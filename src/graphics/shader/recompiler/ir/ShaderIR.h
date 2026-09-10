@@ -496,6 +496,7 @@ struct CompiledShaderInfo {
 	uint32_t                      user_data_count     = 64;
 	uint32_t                      scratch_dwords      = 0;
 	uint32_t                      param_export_mask   = 0;
+	bool                          dispatcher_fallback = false;
 	ShaderInfo                    info;
 	BindingLayout                 bindings;
 };

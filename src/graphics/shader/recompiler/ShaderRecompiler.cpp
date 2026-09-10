@@ -69,6 +69,12 @@ void LogDispatcherFallback(const CompileOptions& options, const CFG::Graph& cfg,
 	     static_cast<uint64_t>(predecessors), static_cast<uint64_t>(successors),
 	     static_cast<uint64_t>(cfg.blocks.size()), static_cast<uint64_t>(cfg.natural_loops.size()),
 	     static_cast<uint64_t>(cfg.back_edges.size()), reason.c_str());
+	// Only a handful of shaders per run reach the dispatcher, and the graph is the only way
+	// to diagnose why. A few thousand lines here beats requiring the graphics debug dump,
+	// which costs hundreds of megabytes and slows startup enough to change what reproduces.
+	LOGF("%s CFG failed graph: stage=%s hash=0x%016" PRIx64 "\n%s",
+	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
+	     CFG::GraphToString(cfg).c_str());
 }
 
 enum class EmbeddedFetchValueType {
