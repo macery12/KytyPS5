@@ -827,29 +827,51 @@ uint32_t AtomicUpdate(EmitterState& state, uint32_t pointer, IR::ResourceKind ki
 			default: return MemorySemanticsUniformMemory;
 		}
 	}();
-	const auto preheader = state.builder.AllocateId();
-	const auto header    = state.builder.AllocateId();
-	const auto cont      = state.builder.AllocateId();
-	const auto merge     = state.builder.AllocateId();
-	const auto initial   = state.builder.AllocateId();
-	const auto observed  = state.builder.AllocateId();
-	const auto exchanged = state.builder.AllocateId();
+	// A compare-exchange retry loop is the only way to emulate a read-modify-write, and it is
+	// correct as long as the exchange eventually succeeds. It normally does: at most one lane
+	// per iteration loses the race, so contention costs iterations rather than progress.
+	//
+	// The retries are bounded anyway. If the exchange never reports the value this lane just
+	// observed - a pointer the device cannot atomically access, for instance - the loop spins
+	// on the GPU with nothing to stop it, and a hang past the display driver's timeout is
+	// reported as a lost device on whatever unrelated submit happens to notice. This bound is
+	// far above any legitimate contention, so reaching it means something else is wrong.
+	constexpr uint32_t RetryLimit = 4096;
+	const auto preheader  = state.builder.AllocateId();
+	const auto header     = state.builder.AllocateId();
+	const auto cont       = state.builder.AllocateId();
+	const auto merge      = state.builder.AllocateId();
+	const auto initial    = state.builder.AllocateId();
+	const auto observed   = state.builder.AllocateId();
+	const auto exchanged  = state.builder.AllocateId();
+	const auto retries    = state.builder.AllocateId();
+	const auto next_retry = state.builder.AllocateId();
 	state.builder.AddFunction({OpBranch, preheader});
 	EmitLabel(state, preheader);
 	state.builder.AddFunction({OpAtomicLoad, TypeU32(state), initial, pointer,
 	                           ConstantU32(state, scope), ConstantU32(state, MemorySemanticsNone)});
 	state.builder.AddFunction({OpBranch, header});
 	EmitLabel(state, header);
+	// Both phis have to lead the block, before anything desired() emits.
 	state.builder.AddFunction(
 	    {OpPhi, TypeU32(state), observed, initial, preheader, exchanged, cont});
+	state.builder.AddFunction({OpPhi, TypeU32(state), retries, ConstantU32(state, 0), preheader,
+	                           next_retry, cont});
 	const auto next = desired(observed);
 	state.builder.AddFunction({OpAtomicCompareExchange, TypeU32(state), exchanged, pointer,
 	                           ConstantU32(state, scope), ConstantU32(state, MemorySemanticsNone),
 	                           ConstantU32(state, MemorySemanticsNone), next, observed});
-	const auto success = state.builder.AllocateId();
+	const auto success   = state.builder.AllocateId();
+	const auto exhausted = state.builder.AllocateId();
+	const auto done      = state.builder.AllocateId();
 	state.builder.AddFunction({OpIEqual, TypeBool(state), success, exchanged, observed});
+	state.builder.AddFunction(
+	    {OpIAdd, TypeU32(state), next_retry, retries, ConstantU32(state, 1)});
+	state.builder.AddFunction({OpUGreaterThanEqual, TypeBool(state), exhausted, next_retry,
+	                           ConstantU32(state, RetryLimit)});
+	state.builder.AddFunction({OpLogicalOr, TypeBool(state), done, success, exhausted});
 	state.builder.AddFunction({OpLoopMerge, merge, cont, LoopControlNone});
-	state.builder.AddFunction({OpBranchConditional, success, merge, cont});
+	state.builder.AddFunction({OpBranchConditional, done, merge, cont});
 	EmitLabel(state, cont);
 	state.builder.AddFunction({OpBranch, header});
 	EmitLabel(state, merge);
