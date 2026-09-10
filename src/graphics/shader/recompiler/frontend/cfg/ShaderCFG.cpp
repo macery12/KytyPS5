@@ -1114,6 +1114,11 @@ bool IsLoopControlExit(const Graph& graph, const NaturalLoop& loop, uint32_t blo
 	// from any depth inside the body, so it is an exit from a selection rather than a member
 	// of it. AGC routes these through an empty gateway block, so follow a chain of empty
 	// single-successor blocks before deciding.
+	//
+	// Only a block that exists solely to forward this edge may be followed. A block several
+	// arms branch to is a join in its own right and has to become somebody's merge block;
+	// reading it as a continue hands the selection a merge that sits above the join, and the
+	// result passes structurization but fails SPIR-V validation.
 	auto current = block_id;
 	for (size_t step = 0; step <= graph.blocks.size(); step++) {
 		if (current == loop.continue_block || current == loop.merge) {
@@ -1121,7 +1126,7 @@ bool IsLoopControlExit(const Graph& graph, const NaturalLoop& loop, uint32_t blo
 		}
 		const auto* block = graph.FindBlock(current);
 		if (block == nullptr || block->inst_begin != block->inst_end ||
-		    block->successors.size() != 1u) {
+		    block->successors.size() != 1u || block->predecessors.size() != 1u) {
 			return false;
 		}
 		current = block->successors.front();
