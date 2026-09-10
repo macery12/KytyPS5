@@ -117,6 +117,10 @@ int KYTY_SYSV_ABI NetResolverDestroy(int rid) {
 	return NET_CALL(Net::NetResolverDestroy(rid));
 }
 
+int KYTY_SYSV_ABI NetResolverAbort(int rid, int flags) {
+	return NET_CALL(Net::NetResolverAbort(rid, flags));
+}
+
 int KYTY_SYSV_ABI NetResolverStartNtoa(int rid, const char* hostname, void* addr, int timeout,
                                        int retry, int flags) {
 	return NET_CALL(Net::NetResolverStartNtoa(rid, hostname, addr, timeout, retry, flags));
@@ -199,6 +203,7 @@ LIB_DEFINE(InitNet_1_Net) {
 	LIB_FUNC("K7RlrTkI-mw", LibNet::NetPoolDestroy);
 	LIB_FUNC("C4UgDHHPvdw", LibNet::NetResolverCreate);
 	LIB_FUNC("kJlYH5uMAWI", LibNet::NetResolverDestroy);
+	LIB_FUNC("AzqoBha7js4", LibNet::NetResolverAbort);
 	LIB_FUNC("Nd91WaWmG2w", LibNet::NetResolverStartNtoa);
 	LIB_FUNC("8Kcp5d-q1Uo", LibNet::NetInetPton);
 	LIB_FUNC("9vA2aW+CHuA", LibNet::NetInetNtop);
@@ -653,6 +658,15 @@ LIB_DEFINE(InitNet_1_Http) {
 	LIB_FUNC("yigr4V0-HTM", Http::HttpSetRecvTimeOut);
 	LIB_FUNC("T-mGo9f3Pu4", Http::HttpSetAutoRedirect);
 	LIB_FUNC("qFg2SuyTJJY", Http::HttpSetAuthEnabled);
+	LIB_FUNC("i9mhafzkEi8", Http::HttpSetInflateGZIPEnabled);
+	LIB_FUNC("PDxS48xGQLs", Http::HttpSetChunkedTransferEnabled);
+	LIB_FUNC("h9wmFZX4i-4", Http::HttpSetRedirectCallback);
+	LIB_FUNC("Kh6bS2HQKbo", Http::HttpSetCookieRecvCallback);
+	LIB_FUNC("vO4B-42ef-k", Http::HttpSetRequestStatusCallback);
+	LIB_FUNC("0onIrKx9NIE", Http::HttpGetLastErrno);
+	LIB_FUNC("DK+GoXCNT04", Http::HttpsLoadCert);
+	LIB_FUNC("zXqcE0fizz0", Http::HttpsUnloadCert);
+	LIB_FUNC("JBN6N-EY+3M", Http::HttpsGetSslError);
 	LIB_FUNC("IWalAn-guFs", LibHttp::HttpUriParse);
 	LIB_FUNC("YuOW3dDAKYc", LibHttp::HttpUriEscape);
 	LIB_FUNC("5LZA+KPISVA", LibHttp::HttpUriBuild);
@@ -1475,6 +1489,7 @@ LIB_DEFINE(InitNet_1_NpManager) {
 	LIB_FUNC("XDncXQIJUSk", NpManager::NpGetOnlineId);
 	LIB_FUNC("rbknaUjpqWo", NpManager::NpGetAccountIdA);
 	LIB_FUNC("JT+t00a3TxA", NpManager::NpGetAccountCountryA);
+	LIB_FUNC("3Tcz5bNCfZQ", NpManager::NpGetAccountLanguage2);
 	LIB_FUNC("+4DegjBqV1g", NpManager::NpGetAccountAge);
 	LIB_FUNC("GpLQDNKICac", NpManager::NpCreateRequest);
 	LIB_FUNC("eiqMCt9UshI", NpManager::NpCreateAsyncRequest);

@@ -141,6 +141,11 @@ public:
 	bool HttpSetRecvTimeOut(Id id, uint32_t usec);
 	bool HttpSetAutoRedirect(Id id, int enable);
 	bool HttpSetAuthEnabled(Id id, int enable);
+	bool HttpSetInflateGZIPEnabled(Id id, int enable);
+	bool HttpSetChunkedTransferEnabled(Id id, int enable);
+	bool HttpSetRedirectCallback(Id id, void* cbfunc, void* user_arg);
+	bool HttpSetCookieRecvCallback(Id id, void* cbfunc, void* user_arg);
+	bool HttpSetRequestStatusCallback(Id id, void* cbfunc, void* user_arg);
 	bool HttpMarkRequestSent(Id req_id, int result);
 	bool HttpGetRequestResponse(Id req_id, int* send_result, int* status_code, const char** headers,
 	                            size_t* headers_size, uint64_t* content_length);
@@ -191,6 +196,14 @@ private:
 		uint32_t                connect_timeout = 30'000000;
 		uint32_t                send_timeout    = 120'000000;
 		uint32_t                recv_timeout    = 120'000000;
+		bool                    inflate_gzip    = true;
+		bool                    chunked_send    = false;
+		void*                   redirect_cbfunc = nullptr;
+		void*                   redirect_arg    = nullptr;
+		void*                   cookie_cbfunc   = nullptr;
+		void*                   cookie_arg      = nullptr;
+		void*                   status_cbfunc   = nullptr;
+		void*                   status_arg      = nullptr;
 	};
 
 	struct HttpTemplate: public HttpBase {
@@ -823,6 +836,74 @@ bool Network::HttpSetAuthEnabled(Id id, int enable) {
 	return false;
 }
 
+bool Network::HttpSetInflateGZIPEnabled(Id id, int enable) {
+	Common::LockGuard lock(m_mutex);
+
+	HttpBase* base = FindHttpBase(id, true);
+
+	if (base != nullptr) {
+		base->inflate_gzip = (enable != 0);
+		return true;
+	}
+
+	return false;
+}
+
+bool Network::HttpSetChunkedTransferEnabled(Id id, int enable) {
+	Common::LockGuard lock(m_mutex);
+
+	HttpBase* base = FindHttpBase(id, true);
+
+	if (base != nullptr) {
+		base->chunked_send = (enable != 0);
+		return true;
+	}
+
+	return false;
+}
+
+bool Network::HttpSetRedirectCallback(Id id, void* cbfunc, void* user_arg) {
+	Common::LockGuard lock(m_mutex);
+
+	HttpBase* base = FindHttpBase(id, true);
+
+	if (base != nullptr) {
+		base->redirect_cbfunc = cbfunc;
+		base->redirect_arg    = user_arg;
+		return true;
+	}
+
+	return false;
+}
+
+bool Network::HttpSetCookieRecvCallback(Id id, void* cbfunc, void* user_arg) {
+	Common::LockGuard lock(m_mutex);
+
+	HttpBase* base = FindHttpBase(id, true);
+
+	if (base != nullptr) {
+		base->cookie_cbfunc = cbfunc;
+		base->cookie_arg    = user_arg;
+		return true;
+	}
+
+	return false;
+}
+
+bool Network::HttpSetRequestStatusCallback(Id id, void* cbfunc, void* user_arg) {
+	Common::LockGuard lock(m_mutex);
+
+	HttpBase* base = FindHttpBase(id, true);
+
+	if (base != nullptr) {
+		base->status_cbfunc = cbfunc;
+		base->status_arg    = user_arg;
+		return true;
+	}
+
+	return false;
+}
+
 namespace Net {
 
 LIB_NAME("Net", "Net");
@@ -1263,6 +1344,24 @@ int KYTY_SYSV_ABI NetResolverDestroy(int rid) {
 
 	EXIT_IF(g_net == nullptr);
 	if (!g_net->ResolverDestroy(rid)) {
+		return NET_ERROR_EBADF;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetResolverAbort(int rid, int flags) {
+	PRINT_NAME();
+
+	LOGF("\t rid   = %d\n"
+	     "\t flags = 0x%08x\n",
+	     rid, flags);
+
+	EXIT_IF(g_net == nullptr);
+
+	// Resolution is synchronous here, so there is never an outstanding lookup to cancel. The
+	// caller only needs the handle validated and a definite answer.
+	if (!g_net->ResolverValid(rid)) {
 		return NET_ERROR_EBADF;
 	}
 
@@ -2516,6 +2615,191 @@ int KYTY_SYSV_ABI HttpSetAuthEnabled(int id, int enable) {
 	return OK;
 }
 
+int KYTY_SYSV_ABI HttpSetInflateGZIPEnabled(int id, int enable) {
+	PRINT_NAME();
+
+	LOGF("\t id     = %d\n"
+	     "\t enable = %d\n",
+	     id, enable);
+
+	EXIT_IF(g_net == nullptr);
+
+	if (!g_net->HttpSetInflateGZIPEnabled(Network::Id(id), enable)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpSetChunkedTransferEnabled(int id, int enable) {
+	PRINT_NAME();
+
+	LOGF("\t id     = %d\n"
+	     "\t enable = %d\n",
+	     id, enable);
+
+	EXIT_IF(g_net == nullptr);
+
+	if (!g_net->HttpSetChunkedTransferEnabled(Network::Id(id), enable)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpSetRedirectCallback(int id, HttpRedirectCallback cbfunc, void* user_arg) {
+	PRINT_NAME();
+
+	LOGF("\t id       = %d\n"
+	     "\t cbfunc   = 0x%016" PRIx64 "\n"
+	     "\t user_arg = 0x%016" PRIx64 "\n",
+	     id, reinterpret_cast<uint64_t>(cbfunc), reinterpret_cast<uint64_t>(user_arg));
+
+	EXIT_IF(g_net == nullptr);
+
+	// Recorded but never invoked: no request ever reaches a redirect, because sending always
+	// fails with HTTP_ERROR_TIMEOUT.
+	if (!g_net->HttpSetRedirectCallback(Network::Id(id), reinterpret_cast<void*>(cbfunc),
+	                                    user_arg)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpSetCookieRecvCallback(int id, HttpCookieRecvCallback cbfunc, void* user_arg) {
+	PRINT_NAME();
+
+	LOGF("\t id       = %d\n"
+	     "\t cbfunc   = 0x%016" PRIx64 "\n"
+	     "\t user_arg = 0x%016" PRIx64 "\n",
+	     id, reinterpret_cast<uint64_t>(cbfunc), reinterpret_cast<uint64_t>(user_arg));
+
+	EXIT_IF(g_net == nullptr);
+
+	if (!g_net->HttpSetCookieRecvCallback(Network::Id(id), reinterpret_cast<void*>(cbfunc),
+	                                      user_arg)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpSetRequestStatusCallback(int id, HttpRequestStatusCallback cbfunc,
+                                               void* user_arg) {
+	PRINT_NAME();
+
+	LOGF("\t id       = %d\n"
+	     "\t cbfunc   = 0x%016" PRIx64 "\n"
+	     "\t user_arg = 0x%016" PRIx64 "\n",
+	     id, reinterpret_cast<uint64_t>(cbfunc), reinterpret_cast<uint64_t>(user_arg));
+
+	EXIT_IF(g_net == nullptr);
+
+	if (!g_net->HttpSetRequestStatusCallback(Network::Id(id), reinterpret_cast<void*>(cbfunc),
+	                                         user_arg)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpGetLastErrno(int request_id, int* err_num) {
+	PRINT_NAME();
+
+	LOGF("\t request_id = %d\n"
+	     "\t err_num    = 0x%016" PRIx64 "\n",
+	     request_id, reinterpret_cast<uint64_t>(err_num));
+
+	if (err_num == nullptr) {
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	EXIT_IF(g_net == nullptr);
+
+	int send_result = HTTP_ERROR_BEFORE_SEND;
+	if (!g_net->HttpGetRequestResponse(Network::Id(request_id), &send_result, nullptr, nullptr,
+	                                   nullptr, nullptr)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	// The caller reads this to classify the failure it was just handed. Leaving it untouched is
+	// what the unresolved-import stub did, and a caller that reads uninitialized stack there can
+	// retry forever. Report the socket errno that matches the recorded result.
+	*err_num = (send_result == HTTP_ERROR_TIMEOUT ? Posix::POSIX_ETIMEDOUT : 0);
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpsLoadCert(int http_ctx_id, int ca_num, const HttpsData** ca_list,
+                                const HttpsData* cert, const HttpsData* priv_key) {
+	PRINT_NAME();
+
+	LOGF("\t http_ctx_id = %d\n"
+	     "\t ca_num      = %d\n"
+	     "\t ca_list     = 0x%016" PRIx64 "\n"
+	     "\t cert        = 0x%016" PRIx64 "\n"
+	     "\t priv_key    = 0x%016" PRIx64 "\n",
+	     http_ctx_id, ca_num, reinterpret_cast<uint64_t>(ca_list),
+	     reinterpret_cast<uint64_t>(cert), reinterpret_cast<uint64_t>(priv_key));
+
+	if (ca_num < 0 || (ca_num > 0 && ca_list == nullptr)) {
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	EXIT_IF(g_net == nullptr);
+
+	// Accepted and discarded. Nothing here performs a TLS handshake, so there is no store for
+	// these to go into; refusing them would fail the caller earlier than the real console does.
+	if (!g_net->HttpValid(Network::Id(http_ctx_id))) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpsUnloadCert(int http_ctx_id) {
+	PRINT_NAME();
+
+	LOGF("\t http_ctx_id = %d\n", http_ctx_id);
+
+	EXIT_IF(g_net == nullptr);
+
+	if (!g_net->HttpValid(Network::Id(http_ctx_id))) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI HttpsGetSslError(int request_id, int* err_num, uint64_t* detail) {
+	PRINT_NAME();
+
+	LOGF("\t request_id = %d\n"
+	     "\t err_num    = 0x%016" PRIx64 "\n"
+	     "\t detail     = 0x%016" PRIx64 "\n",
+	     request_id, reinterpret_cast<uint64_t>(err_num), reinterpret_cast<uint64_t>(detail));
+
+	if (err_num == nullptr) {
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	EXIT_IF(g_net == nullptr);
+
+	if (!g_net->HttpValidRequest(Network::Id(request_id))) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	// Sending fails as a transport timeout before any handshake happens, so there is no SSL
+	// error to report. Both outputs are still written: the caller reads them unconditionally.
+	*err_num = 0;
+	if (detail != nullptr) {
+		*detail = 0;
+	}
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI HttpAddRequestHeader(int id, const char* name, const char* value, uint32_t mode) {
 	PRINT_NAME();
 
@@ -3326,6 +3610,12 @@ struct NpCountryCode {
 	char padding[1];
 };
 
+struct NpLanguageCode {
+	char data[5];
+	char term;
+	char padding[2];
+};
+
 struct NpAgeRestriction {
 	NpCountryCode country_code;
 	int8_t        age;
@@ -3579,6 +3869,23 @@ int KYTY_SYSV_ABI NpGetAccountCountryA(int user_id, void* country_code) {
 	// code->data[1] = 'S';
 
 	// return OK;
+	return np_error_signed_out;
+}
+
+int KYTY_SYSV_ABI NpGetAccountLanguage2(int user_id, void* language_code) {
+	PRINT_NAME();
+
+	LOGF("\t user_id = %d\n", user_id);
+
+	if (language_code == nullptr) {
+		return np_error_invalid_argument;
+	}
+
+	// Matches NpGetAccountCountryA: the account language belongs to a signed-in PSN account, and
+	// there is none. Clear the output anyway, because the caller reads it regardless.
+	auto* code = static_cast<NpLanguageCode*>(language_code);
+	std::memset(code, 0, sizeof(*code));
+
 	return np_error_signed_out;
 }
 
