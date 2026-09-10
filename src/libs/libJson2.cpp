@@ -630,6 +630,12 @@ static void KYTY_SYSV_ABI JsonValueDtor(void* self) {
 	JsonValueClear(reinterpret_cast<JsonValue*>(self));
 }
 
+static void KYTY_SYSV_ABI JsonValueClearMethod(JsonValue* self) {
+	PRINT_NAME();
+
+	JsonValueClear(self);
+}
+
 static JsonValue* KYTY_SYSV_ABI JsonValueAssign(JsonValue* self, const JsonValue* src) {
 	PRINT_NAME();
 
@@ -984,6 +990,19 @@ static int32_t KYTY_SYSV_ABI JsonInitializerSetGlobalNullAccessCallback(void* se
 	return 0;
 }
 
+static int32_t KYTY_SYSV_ABI JsonValueSetNullAccessCallback(JsonValue* self, void* callback,
+                                                            void* context) {
+	PRINT_NAME();
+
+	LOGF("\t self     = 0x%016" PRIx64 "\n"
+	     "\t callback = 0x%016" PRIx64 "\n"
+	     "\t context  = 0x%016" PRIx64 "\n",
+	     reinterpret_cast<uint64_t>(self), reinterpret_cast<uint64_t>(callback),
+	     reinterpret_cast<uint64_t>(context));
+
+	return 0;
+}
+
 static int32_t KYTY_SYSV_ABI JsonValueCount(const JsonValue* self) {
 	PRINT_NAME();
 
@@ -1017,6 +1036,8 @@ LIB_DEFINE(InitNet_1_Json2) {
 	LIB_FUNC("CbrT3dwDILo", LibJson2::JsonValueTypeCtor);
 	LIB_FUNC("WTtYf+cNnXI", LibJson2::JsonValueDtor);
 	LIB_FUNC("0eUrW9JAxM0", LibJson2::JsonValueDtor);
+	LIB_FUNC("FIjXN2TkuTs", LibJson2::JsonValueClearMethod);
+	LIB_FUNC("Xbl-LYVFNEE", LibJson2::JsonValueSetNullAccessCallback);
 	LIB_FUNC("S5JxQnoGF3E", LibJson2::JsonParserParse);
 	LIB_FUNC("HwDt5lD9Bfo", LibJson2::JsonValueIndexString);
 	LIB_FUNC("epJ6x2LV0kU", LibJson2::JsonValueGetString);
