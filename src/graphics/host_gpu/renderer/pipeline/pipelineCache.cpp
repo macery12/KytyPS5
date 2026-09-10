@@ -102,9 +102,18 @@ bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
 }
 
+// Writing the shaders out is what makes a recompiler problem analysable offline, and requiring
+// the graphics debug dump for it is too blunt: that costs hundreds of megabytes of log and slows
+// startup enough to change what reproduces. The shader log folder already exists for exactly this
+// output, so File direction is enough on its own.
+bool ShaderDumpEnabled() {
+	return Config::GraphicsDebugDumpEnabled() ||
+	       Config::GetShaderLogDirection() == Config::ShaderLogDirection::File;
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!ShaderDumpEnabled()) {
 		return;
 	}
 	static std::atomic_int id = 0;
@@ -122,7 +131,7 @@ void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
 
 void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash,
                         std::span<const uint32_t> code, const std::string& decoded_dump) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!ShaderDumpEnabled()) {
 		return;
 	}
 	EXIT_IF(code.empty());
