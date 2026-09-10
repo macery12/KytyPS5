@@ -74,6 +74,12 @@ struct Pcm {
 	const void* data;
 };
 
+struct UserSupportedAttributes {
+	uint32_t flags;
+	uint32_t reserved;
+	uint32_t output_type;
+};
+
 const auto* AsParam(const PortParam* param) {
 	return reinterpret_cast<const AudioOut2::AudioOut2PortParam*>(param);
 }
@@ -88,6 +94,10 @@ auto* AsState(PortState* state) {
 
 const auto* AsAttribute(const Attribute* attribute) {
 	return reinterpret_cast<const AudioOut2::AudioOut2Attribute*>(attribute);
+}
+
+auto* AsUserSupportedAttributes(UserSupportedAttributes* attributes) {
+	return reinterpret_cast<AudioOut2::AudioOut2UserSupportedAttributes*>(attributes);
 }
 
 PortParam MakeParam(uint32_t data_format = 0x200) {
@@ -327,6 +337,20 @@ void TestHandleWithoutPcmDoesNotBypassQueue() {
 	AudioOut2::AudioOut2ContextDestroy(context);
 }
 
+void TestUserSupportedAttributesAreInitialized() {
+	AudioOut2::AudioOut2UserHandle handle = 0;
+	Check(AudioOut2::AudioOut2UserCreate(1, &handle) == OK, "user create failed");
+
+	UserSupportedAttributes attributes {0xffffffffu, 0xffffffffu, 0xffffffffu};
+	Check(AudioOut2::AudioOut2UserGetSupportedAttributes(
+	          handle, AsUserSupportedAttributes(&attributes)) == OK,
+	      "user supported-attributes query failed");
+	Check(attributes.flags == 0 && attributes.reserved == 0 && attributes.output_type == 0,
+	      "unsupported user capabilities were not cleared");
+
+	Check(AudioOut2::AudioOut2UserDestroy(handle) == OK, "user destroy failed");
+}
+
 } // namespace
 
 namespace Libs::Audio::AudioInternal {
@@ -389,6 +413,7 @@ int main() {
 	TestFloat12ChannelPortOutputsPcm();
 	TestAsynchronousDevicePushKeepsQueueBounded();
 	TestHandleWithoutPcmDoesNotBypassQueue();
+	TestUserSupportedAttributesAreInitialized();
 	std::printf("AudioOut2PortTests: all cases passed\n");
 	return 0;
 }

@@ -37,6 +37,7 @@ struct AudioOut2PortParam;
 struct AudioOut2Attribute;
 struct AudioOut2PortState;
 struct AudioOut2SystemState;
+struct AudioOut2UserSupportedAttributes;
 struct AudioOut2Position;
 struct AudioOut2SpeakerInfo;
 struct AudioOut2SystemDebugStateParam;
@@ -70,6 +71,8 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(AudioOut2PortHandle port, AudioOut2PortS
 int KYTY_SYSV_ABI AudioOut2GetSystemState(AudioOut2SystemState* state);
 int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, AudioOut2UserHandle* handle);
 int KYTY_SYSV_ABI AudioOut2UserDestroy(AudioOut2UserHandle handle);
+int KYTY_SYSV_ABI AudioOut2UserGetSupportedAttributes(
+    AudioOut2UserHandle handle, AudioOut2UserSupportedAttributes* attributes);
 size_t KYTY_SYSV_ABI AudioOut2GetSpeakerArrayMemorySize(uint32_t num_speakers, uint8_t is_3d,
                                                         uint8_t is_ambisonics);
 int KYTY_SYSV_ABI    AudioOut2SpeakerArrayCreate(AudioOut2SpeakerArrayHandle* handle,
