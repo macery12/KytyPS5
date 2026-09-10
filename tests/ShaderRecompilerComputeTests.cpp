@@ -17366,6 +17366,43 @@ TestCase VectorSpecialF16Ops() {
            O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
 }
 
+TestCase VectorFractF16Ops() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 0, 0x00004100u); // low=+2.5h
+  AppendVMovLiteral(&code, 1, 0x0000c100u); // low=-2.5h
+  AppendVMovLiteral(&code, 2, 0x0000b400u); // low=-0.25h
+  AppendVMovLiteral(&code, 3, 0x00003c00u); // low=+1.0h
+  AppendVMovLiteral(&code, 4, 0x00007bffu); // low=+65504.0h (largest finite)
+  AppendVMovLiteral(&code, 7, 0x00004300u); // low=+3.5h
+
+  code.push_back(EncodeVop1(0x5f, 10, Vgpr(0)));
+  code.push_back(EncodeVop1(0x5f, 11, Vgpr(1)));
+  code.push_back(EncodeVop1(0x5f, 12, Vgpr(2)));
+  code.push_back(EncodeVop1(0x5f, 13, Vgpr(3)));
+  code.push_back(EncodeVop1(0x5f, 14, Vgpr(4)));
+  code.push_back(0x7e12bf07u); // captured v_fract_f16 v9, v7
+  // VOP3-encoded v_fract_f16 v16, -v2 exercises the source negate modifier.
+  AppendVop3(&code, 0x1df, 16, Vgpr(2), 0, 0, 0, 0, false, 0, 1);
+
+  const u32 results[] = {10, 11, 12, 13, 14, 9, 16};
+  for (u32 i = 0; i < static_cast<u32>(std::size(results)); i++) {
+    AppendStoreVgpr(&code, results[i], i);
+  }
+  AppendEnd(&code);
+
+  // fract(x) is x - floor(x) evaluated at half precision:
+  // 2.5h->0.5h, -2.5h->0.5h, -0.25h->0.75h, 1.0h->0.0h, 65504.0h->0.0h,
+  // 3.5h->0.5h, -(-0.25h)->0.25h.
+  return {"VectorFractF16Ops",
+          code,
+          {},
+          {0x00003800u, 0x00003800u, 0x00003a00u, 0x00000000u, 0x00000000u,
+           0x00003800u, 0x00003400u},
+          {O::V_MOV_B32, O::V_FRACT_F16, O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+}
+
 TestCase VectorCosF16CapturedSdwaAndEdges() {
   using O = ShaderOpcode;
 
@@ -19121,6 +19158,37 @@ TestCase VectorVopcCmpxGtU16CapturedSdwaExecMask() {
                 {O::V_MOV_B32, O::V_CMPX_GT_U16, O::BUFFER_STORE_DWORD,
                  O::S_ENDPGM}};
   test.decoded_counts = {{"V_CMPX_GT_U16", 2}};
+  return test;
+}
+
+TestCase VectorVopcCmpxLtU16CapturedSdwaExecMask() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 0, 0u);
+  AppendVMovU32(&code, 3, 7u);
+  AppendVMovU32(&code, 31, 0u);
+  code.push_back(EncodeSMovB32(106, InlineU32(1u)));
+  code.insert(code.end(), {0x7d72d4f9u, 0x86060000u});
+  AppendBufferStoreDword(&code, 3, 31);
+
+  code.push_back(EncodeSMovB32(126, InlineU32(1u)));
+  AppendVMovU32(&code, 0, 2u);
+  AppendVMovU32(&code, 3, 9u);
+  AppendVMovU32(&code, 31, 4u);
+  code.push_back(EncodeSMovB32(106, InlineU32(1u)));
+  code.insert(code.end(), {0x7d72d4f9u, 0x86060000u});
+  AppendBufferStoreDword(&code, 3, 31);
+  AppendEnd(&code);
+
+  TestCase test{"VectorVopcCmpxLtU16CapturedSdwaExecMask",
+                code,
+                {0x11111111u, 0x22222222u},
+                {7u, 0x22222222u},
+                {O::S_MOV_B32, O::V_MOV_B32, O::V_CMPX_LT_U16,
+                 O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+  test.decoded_counts = {
+      {"V_CMPX_LT_U16 exec_lo, v0, vcc_lo", 2}};
   return test;
 }
 
@@ -24455,6 +24523,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(NativeAndSdwa16BitDestinationWrites);
   AddCase(VectorMinMaxMed3F16Ops);
   AddCase(VectorSpecialF16Ops);
+  AddCase(VectorFractF16Ops);
   AddCase(VectorCosF16CapturedSdwaAndEdges);
   AddCase(VectorSinF16SdwaAndEdges);
   AddCase(VectorWritelaneIgnoresExecMask);
@@ -24507,6 +24576,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorVop3CmpxWritesExecMask);
   AddCase(VectorVopcSdwaCmpxWritesExecMask);
   AddCase(VectorVopcCmpxGtU16CapturedSdwaExecMask);
+  AddCase(VectorVopcCmpxLtU16CapturedSdwaExecMask);
   AddCase(VectorVopcCmpxNgtF16CapturedSdwaExecMask);
   AddCase(VectorCompareInvertedMaskSelect);
   AddCase(BranchSelect);
