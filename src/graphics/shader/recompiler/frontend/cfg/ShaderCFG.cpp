@@ -2403,40 +2403,46 @@ bool StructurizeImpl(Graph& graph, bool allow_terminal_cloning) {
 } // namespace
 
 bool Structurize(Graph& graph) {
-	const Graph original = graph;
-	if (StructurizeImpl(graph, false)) {
+	Graph structured = graph;
+	if (StructurizeImpl(structured, false)) {
+		graph = std::move(structured);
 		return true;
 	}
-
-	Graph      failed_graph = std::move(graph);
-	graph                   = original;
+	Graph first_failed = std::move(structured);
+	Graph routed = graph;
 	const auto route_budget = static_cast<uint32_t>(graph.blocks.size());
 	// Apply one route at a time and retry. Eagerly routing every matching diamond can
 	// rewrite unrelated selections that were already structurally valid.
 	for (uint32_t route_variable = 0; route_variable < route_budget; route_variable++) {
-		if (!RouteSharedSelectionArm(graph, route_variable)) {
+		if (!RouteSharedSelectionArm(routed, route_variable)) {
 			break;
 		}
-		Graph routed = graph;
-		if (StructurizeImpl(routed, false)) {
-			graph = std::move(routed);
+		structured = routed;
+		if (StructurizeImpl(structured, false)) {
+			graph = std::move(structured);
 			return true;
 		}
 	}
 
-	// Routing left a selection open. Duplicating a shared terminal return is the last resort
-	// before the dispatcher: it costs one copy of an epilogue, but the dispatcher's state
-	// machine has been observed to defeat the driver's shader compiler on large shaders.
-	Graph cloned = original;
+	// Cloning a shared terminal return is the last resort before the dispatcher.
+	Graph cloned = graph;
 	if (StructurizeImpl(cloned, true)) {
 		graph = std::move(cloned);
 		return true;
 	}
 
-	// Report the most permissive attempt's diagnosis. The first attempt fails by design
-	// wherever cloning is what closes the selection, so its reason describes the policy
-	// rather than the shape that could not be structurized.
-	graph = cloned.unsupported_reason.empty() ? std::move(failed_graph) : std::move(cloned);
+	const Graph& diagnostic =
+	    cloned.unsupported_reason.empty() ? first_failed : cloned;
+	// Structurization may insert and renumber blocks. Report a source block when possible,
+	// while leaving the original graph intact for the dispatcher fallback.
+	const auto* failed = diagnostic.FindBlock(diagnostic.failure_block);
+	const auto original = std::ranges::find_if(graph.blocks, [&](const BasicBlock& block) {
+		return failed != nullptr && failed->inst_begin != failed->inst_end &&
+		       block.inst_begin == failed->inst_begin && block.inst_end == failed->inst_end &&
+		       block.start_pc == failed->start_pc && block.end_pc == failed->end_pc;
+	});
+	const auto failure_block = original != graph.blocks.end() ? original->id : UINT32_MAX;
+	SetFailure(graph, diagnostic.failure_kind, failure_block, diagnostic.unsupported_reason);
 	return false;
 }
 
