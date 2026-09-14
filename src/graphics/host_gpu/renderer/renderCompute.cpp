@@ -671,14 +671,8 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		return false;
 	}
 	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		// Track deferred DCC state while the original dispatch writes the metadata allocation.
-		cache.TrackDccFill(descriptor.Base48(), size, packed_clear);
-		static std::atomic<uint32_t> logged_metadata_clears {0};
-		if (logged_metadata_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
-			LOGF("GraphicsRenderDispatchDirect: metadata fill shader=0x%016" PRIx64
-			     " addr=0x%016" PRIx64 " size=0x%016" PRIx64 " value=0x%08" PRIx32 "\n",
-			     input.stage.program->shader_hash, descriptor.Base48(), size, packed_clear);
-		}
+		// The original dispatch still writes the allocation; a CMask render target may consume it.
+		cache.TrackCmaskFill(descriptor.Base48(), size, packed_clear);
 		return false;
 	}
 	static std::atomic<uint32_t> logged_clears {0};
@@ -1023,8 +1017,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}
-	RebindBuffers(bindings);
 	RebindImages(bindings);
+	RebindBuffers(bindings);
 	// Capture the UI surface immediately after its draws and before the final compositor reads it.
 	// This diagnostic is opt-in and takes one GPU-to-host copy for the entire run.
 	static const bool dump_ui_target = [] {

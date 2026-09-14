@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -230,12 +231,18 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void CreatePipelineInternal(
-    GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
-    const PipelineRenderingState& rendering, const PipelineVertexInputState& vertex_input,
-    const ShaderVertexInputInfo& vs_input_info, const ShaderProgram& vertex_program,
-    const ShaderPixelInputInfo* ps_input_info, const ShaderProgram& pixel_program,
-    const PipelineStaticParameters& static_params, vk::PipelineCache driver_cache) {
+void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
+                            const PipelineRenderingState&          rendering,
+                            const PipelineVertexInputState&        vertex_input,
+                            std::span<const ShaderVertexInputInfo> vertex_info,
+                            const ShaderPixelInputInfo*            ps_input_info,
+                            const PipelineCache::GraphicsPrograms& programs,
+                            const PipelineStaticParameters&        static_params,
+                            vk::PipelineCache                      driver_cache) {
+	const auto& vs_input_info  = vertex_info.front();
+	const auto& vertex_program = programs.vertex[0];
+	const auto& pixel_program  = programs.pixel;
+	const bool  tessellation   = vertex_info.size() == 3;
 	const bool ps_active = ps_input_info != nullptr;
 	EXIT_IF(!vertex_program || (ps_active && !pixel_program));
 	const bool with_depth = rendering.depth_format != vk::Format::eUndefined ||
@@ -243,46 +250,39 @@ void CreatePipelineInternal(
 	EXIT_IF(!vs_input_info.stage);
 	const bool mesh = vs_input_info.stage.program->stage == ShaderType::Mesh;
 	EXIT_NOT_IMPLEMENTED(mesh && !graphics.mesh_shader_enabled);
-	const auto vertex_stage =
-	    mesh ? vk::ShaderStageFlagBits::eMeshEXT : vk::ShaderStageFlagBits::eVertex;
-
-	const bool rect_list = !mesh && static_params.topology == vk::PrimitiveTopology::ePatchList;
+	const bool rect_list =
+	    !mesh && !tessellation && static_params.topology == vk::PrimitiveTopology::ePatchList;
 
 	vk::ShaderModule tess_control_shader_module = nullptr;
 	vk::ShaderModule tess_eval_shader_module    = nullptr;
 
-	vk::ShaderModuleCreateInfo create_info {};
-	vk::Result result {};
 	if (rect_list) {
 		const auto shaders =
 		    BuildRectListShaders(vs_input_info, ps_active ? ps_input_info : nullptr);
-		create_info.codeSize = shaders.control.size() * 4;
-		create_info.pCode    = shaders.control.data();
-		result =
-		    graphics.device.createShaderModule(&create_info, nullptr, &tess_control_shader_module);
+		tess_control_shader_module = CompileSPV(shaders.control, graphics.device);
 		if (graphics_debug_dump_enabled()) {
-			LOGF("PipelineTrace: vkCreateShaderModule RectList TCS done result=%s module=%p\n",
-			     vk::to_string(result).c_str(), static_cast<void*>(tess_control_shader_module));
+			LOGF("PipelineTrace: vkCreateShaderModule RectList TCS done module=%p\n",
+			     static_cast<void*>(tess_control_shader_module));
 		}
-		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
-		create_info.codeSize = shaders.evaluation.size() * 4;
-		create_info.pCode    = shaders.evaluation.data();
-		result =
-		    graphics.device.createShaderModule(&create_info, nullptr, &tess_eval_shader_module);
+		tess_eval_shader_module = CompileSPV(shaders.evaluation, graphics.device);
 		if (graphics_debug_dump_enabled()) {
-			LOGF("PipelineTrace: vkCreateShaderModule RectList TES done result=%s module=%p\n",
-			     vk::to_string(result).c_str(), static_cast<void*>(tess_eval_shader_module));
+			LOGF("PipelineTrace: vkCreateShaderModule RectList TES done module=%p\n",
+			     static_cast<void*>(tess_eval_shader_module));
 		}
-		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	}
 
 	EXIT_NOT_IMPLEMENTED(
 	    rect_list && (tess_control_shader_module == nullptr || tess_eval_shader_module == nullptr));
 
-	vk::PipelineShaderStageCreateInfo shader_stages[4] = {
-	    {.stage = vertex_stage, .module = vertex_program.module, .pName = "main"}};
-	uint32_t shader_stage_count = 1;
+	vk::PipelineShaderStageCreateInfo shader_stages[4] {};
+	uint32_t                          shader_stage_count = 0;
+	for (uint32_t i = 0; i < vertex_info.size(); i++) {
+		shader_stages[shader_stage_count++] = {.stage =
+		                                           NativeShaderStage(vertex_info[i].logical_stage),
+		                                       .module = programs.vertex[i].module,
+		                                       .pName  = "main"};
+	}
 	if (rect_list) {
 		shader_stages[shader_stage_count++] = {.stage =
 		                                           vk::ShaderStageFlagBits::eTessellationControl,
@@ -457,15 +457,19 @@ void CreatePipelineInternal(
 	color_blending.pAttachments    = color_blend_attachment;
 
 	std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;
-	AddLayoutBindings(descriptor_bindings, *vs_input_info.stage.program, vertex_stage);
+	vk::ShaderStageFlags graphics_stages = vk::ShaderStageFlagBits::eFragment;
+	for (const auto& stage: vertex_info) {
+		const auto native_stage = NativeShaderStage(stage.logical_stage);
+		AddLayoutBindings(descriptor_bindings, *stage.stage.program, native_stage);
+		graphics_stages |= native_stage;
+	}
 	if (ps_active) {
 		EXIT_IF(!ps_input_info->stage);
 		AddLayoutBindings(descriptor_bindings, *ps_input_info->stage.program,
 		                  vk::ShaderStageFlagBits::eFragment);
 	}
 	CreateDescriptorLayout(graphics, pipeline, descriptor_bindings);
-	const auto                  GraphicsStages = vertex_stage | vk::ShaderStageFlagBits::eFragment;
-	const vk::PushConstantRange push_constants {GraphicsStages, 0,
+	const vk::PushConstantRange push_constants {graphics_stages, 0,
 	                                            ShaderRecompiler::IR::NativePushConstantSize};
 
 	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
@@ -481,8 +485,8 @@ void CreatePipelineInternal(
 		     " set_layouts=1 push_constants=%" PRIu32 "\n",
 		     vertex_program.id, ps_active ? pixel_program.id : 0, 1u);
 	}
-	result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
-	                                              &pipeline.pipeline_layout);
+	auto result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+	                                                   &pipeline.pipeline_layout);
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreatePipelineLayout done result=%s layout=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
@@ -498,15 +502,6 @@ void CreatePipelineInternal(
 #else
 	    (static_params.depth_bounds_test_enable ? VK_TRUE : VK_FALSE);
 #endif
-	depth_stencil_info.stencilTestEnable = (static_params.stencil_test_enable ? VK_TRUE : VK_FALSE);
-	depth_stencil_info.front.failOp      = static_params.stencil_front.failOp;
-	depth_stencil_info.front.passOp      = static_params.stencil_front.passOp;
-	depth_stencil_info.front.depthFailOp = static_params.stencil_front.depthFailOp;
-	depth_stencil_info.front.compareOp   = static_params.stencil_front.compareOp;
-	depth_stencil_info.back.failOp       = static_params.stencil_back.failOp;
-	depth_stencil_info.back.passOp       = static_params.stencil_back.passOp;
-	depth_stencil_info.back.depthFailOp  = static_params.stencil_back.depthFailOp;
-	depth_stencil_info.back.compareOp    = static_params.stencil_back.compareOp;
 	depth_stencil_info.minDepthBounds    = static_params.depth_min_bounds;
 	depth_stencil_info.maxDepthBounds    = static_params.depth_max_bounds;
 
@@ -519,6 +514,8 @@ void CreatePipelineInternal(
 	    vk::DynamicState::eDepthCompareOp,
 	    vk::DynamicState::eDepthBiasEnable,
 	    vk::DynamicState::eDepthBias,
+	    vk::DynamicState::eStencilTestEnable,
+	    vk::DynamicState::eStencilOp,
 	    vk::DynamicState::eStencilCompareMask,
 	    vk::DynamicState::eStencilReference,
 	    vk::DynamicState::eStencilWriteMask,
@@ -555,8 +552,9 @@ void CreatePipelineInternal(
 	pipeline_info.pVertexInputState        = mesh ? nullptr : &vertex_input_info;
 	pipeline_info.pInputAssemblyState      = mesh ? nullptr : &input_assembly;
 	vk::PipelineTessellationStateCreateInfo tessellation_state {};
-	tessellation_state.patchControlPoints = 3;
-	pipeline_info.pTessellationState      = (rect_list ? &tessellation_state : nullptr);
+	tessellation_state.patchControlPoints =
+	    tessellation ? vs_input_info.tess.input_control_points : 3u;
+	pipeline_info.pTessellationState = (rect_list || tessellation) ? &tessellation_state : nullptr;
 	pipeline_info.pViewportState          = &viewport_state;
 	pipeline_info.pRasterizationState     = &rasterizer;
 	pipeline_info.pMultisampleState       = &multisampling;

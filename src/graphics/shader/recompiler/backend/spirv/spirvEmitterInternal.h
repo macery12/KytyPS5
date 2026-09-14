@@ -81,6 +81,10 @@ struct EmitterState {
 	Builder                                          builder;
 	const IR::Program&                               program;
 	ShaderStageInputInfo                             input_info;
+	std::array<uint32_t, 6>                          tess_variables {};
+	uint32_t                                         tess_inner_variable = 0;
+	uint32_t                                         tess_patch_base     = 0;
+
 	const SpirvRequirements                          requirements;
 	uint32_t                                         lane_count              = 1;
 	uint32_t                                         lane_half               = 0;
@@ -317,7 +321,11 @@ uint32_t ConstantU64(EmitterState& state, uint64_t value);
 
 uint32_t ConstantU32CompositeZero(EmitterState& state, uint32_t components);
 
+uint32_t DefineInterfaceVariable(EmitterState& state, uint32_t type, spv::StorageClass storage,
+                                 const char* name);
 void     DefineModule(EmitterState& state);
+void     DefineTessellationInterfaces(EmitterState& state);
+void     DefineTessellationExecutionModes(EmitterState& state);
 void     DefineMeshOutputs(EmitterState& state);
 void     EmitMeshEntryPoint(EmitterState& state);
 void     EmitMeshAllocate(ValueEmitContext& ctx, const IR::Inst& inst);

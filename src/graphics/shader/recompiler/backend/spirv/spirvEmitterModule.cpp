@@ -290,7 +290,8 @@ uint32_t GlslStd450(EmitterState& state) {
 }
 
 VertexInputScalarKind VertexParameterScalarKind(const EmitterState& state, uint32_t location) {
-	if (state.program.stage != ShaderType::Vertex || location >= ShaderVertexInputInfo::RES_MAX ||
+	if ((state.program.stage != ShaderType::Vertex && state.program.stage != ShaderType::Local) ||
+	    location >= ShaderVertexInputInfo::RES_MAX ||
 	    location >= static_cast<uint32_t>(state.input_info.vertex->resources_num)) {
 		return VertexInputScalarKind::Float;
 	}
@@ -333,8 +334,6 @@ uint32_t VertexParameterScalarType(EmitterState& state, VertexInputScalarKind ki
 	}
 }
 
-namespace {
-
 uint32_t DefineInterfaceVariable(EmitterState& state, uint32_t type, spv::StorageClass storage,
                                  const char* name) {
 	const auto variable =
@@ -344,9 +343,14 @@ uint32_t DefineInterfaceVariable(EmitterState& state, uint32_t type, spv::Storag
 	return variable;
 }
 
+namespace {
+
 uint32_t BuiltInForInput(IR::StageInputKind kind) {
 	switch (kind) {
 		case IR::StageInputKind::VertexIndex: return spv::BuiltInVertexIndex;
+		case IR::StageInputKind::InvocationId: return spv::BuiltInInvocationId;
+		case IR::StageInputKind::PrimitiveId: return spv::BuiltInPrimitiveId;
+		case IR::StageInputKind::TessCoord: return spv::BuiltInTessCoord;
 		case IR::StageInputKind::InstanceIndex: return spv::BuiltInInstanceIndex;
 		case IR::StageInputKind::FragCoord: return spv::BuiltInFragCoord;
 		case IR::StageInputKind::FrontFacing: return spv::BuiltInFrontFacing;
@@ -393,6 +397,8 @@ void DefineInputs(EmitterState& state) {
 		uint32_t type = TypeU32(state);
 		switch (input.kind) {
 			case IR::StageInputKind::VertexIndex:
+			case IR::StageInputKind::InvocationId:
+			case IR::StageInputKind::PrimitiveId:
 			case IR::StageInputKind::InstanceIndex:
 			case IR::StageInputKind::Layer:
 			case IR::StageInputKind::SampleId: type = TypeI32(state); break;
@@ -400,11 +406,13 @@ void DefineInputs(EmitterState& state) {
 			case IR::StageInputKind::LocalInvocationId:
 			case IR::StageInputKind::GlobalInvocationId: type = TypeU32Vector(state, 3); break;
 			case IR::StageInputKind::FragCoord: type = TypeF32Vector(state, 4); break;
+			case IR::StageInputKind::TessCoord:
 			case IR::StageInputKind::BaryCoordSmooth:
 			case IR::StageInputKind::BaryCoordNoPerspective: type = TypeF32Vector(state, 3); break;
 			case IR::StageInputKind::FrontFacing: type = TypeBool(state); break;
 			case IR::StageInputKind::Parameter:
-				if (state.program.stage == ShaderType::Vertex) {
+				if (state.program.stage == ShaderType::Vertex ||
+				    state.program.stage == ShaderType::Local) {
 					type = VertexParameterScalarType(
 					    state, VertexParameterScalarKind(state, input.location));
 					const auto components = VertexParameterComponentCount(input);
@@ -553,6 +561,7 @@ void DefineModule(EmitterState& state) {
 	                                  state.program.info.outputs.size());
 	DefineInputs(state);
 	DefineOutputs(state);
+	DefineTessellationInterfaces(state);
 	DefineDescriptors(state);
 	if (state.requirements.function_lds) {
 		state.lds_variable = state.builder.AllocateId();
@@ -573,6 +582,10 @@ void DefineModule(EmitterState& state) {
 		                               state.input_info.vertex->mesh.max_vertices);
 		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputPrimitivesEXT,
 		                               state.input_info.vertex->mesh.max_primitives);
+	}
+	if (state.program.stage == ShaderType::TessellationControl ||
+	    state.program.stage == ShaderType::TessellationEvaluation) {
+		DefineTessellationExecutionModes(state);
 	}
 	state.entry_label = state.builder.AllocateId();
 
