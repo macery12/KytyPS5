@@ -108,6 +108,9 @@ struct EmitterState {
 	uint32_t                   current_label                         = 0;
 	const IR::Block*           current_block                         = nullptr;
 	uint32_t                   pixel_valid_mask_variable             = 0;
+	uint32_t                   loop_guard_variable                   = 0;
+	uint32_t                   loop_guard_limit                      = 0;
+	std::vector<uint32_t>      loop_guard_exits;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
@@ -400,6 +403,11 @@ uint32_t EmitUFloatToF32Bits(EmitterState& state, uint32_t raw, uint32_t bits);
 
 uint32_t NormalizeFormatComponent(EmitterState& state, const Format::BufferFormatInfo& info,
                                   uint32_t component, uint32_t raw);
+
+// Inverse of NormalizeFormatComponent for formatted stores: encodes a 32-bit shader value into
+// the raw bits of a narrower or normalized component.
+uint32_t DenormalizeFormatComponent(EmitterState& state, const Format::BufferFormatInfo& info,
+                                    uint32_t component, uint32_t value);
 
 void EmitDeviceAtomicMemoryBarrier(EmitterState& state);
 

@@ -3877,12 +3877,13 @@ int KYTY_SYSV_ABI NpGetAccountCountryA(int user_id, void* country_code) {
 	return np_error_signed_out;
 }
 
-int KYTY_SYSV_ABI NpGetAccountLanguage2(int user_id, void* language_code) {
+int KYTY_SYSV_ABI NpGetAccountLanguage2(int req_id, int user_id, void* language_code) {
 	PRINT_NAME();
 
+	LOGF("\t req_id  = %d\n", req_id);
 	LOGF("\t user_id = %d\n", user_id);
 
-	if (language_code == nullptr) {
+	if (req_id <= 0 || language_code == nullptr) {
 		return np_error_invalid_argument;
 	}
 

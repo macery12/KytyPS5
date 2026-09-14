@@ -77,6 +77,10 @@ vk::PhysicalDeviceVulkan13Features WindowContext::RequiredVulkan13Features() noe
 	vk::PhysicalDeviceVulkan13Features features {};
 	features.dynamicRendering = VK_TRUE;
 	features.synchronization2 = VK_TRUE;
+	// The bundled shaders are compiled for Vulkan 1.3, so glslang emits SPIR-V 1.6, which
+	// spells compute workgroup sizes as OpExecutionModeId LocalSizeId. That form is only
+	// legal when maintenance4 is enabled (VUID-RuntimeSpirv-LocalSizeId-06434).
+	features.maintenance4 = VK_TRUE;
 	return features;
 }
 
@@ -297,8 +301,16 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 			LOGF("synchronization2 is not supported\n");
 			skip_device = true;
 		}
+		if (required_features13.maintenance4 == VK_TRUE && features13.maintenance4 != VK_TRUE) {
+			LOGF("maintenance4 is not supported\n");
+			skip_device = true;
+		}
 		if (device_features2.features.sampleRateShading != VK_TRUE) {
 			LOGF("sampleRateShading is not supported\n");
+			skip_device = true;
+		}
+		if (device_features2.features.dualSrcBlend != VK_TRUE) {
+			LOGF("dualSrcBlend is not supported\n");
 			skip_device = true;
 		}
 		if (device_features2.features.depthBiasClamp != VK_TRUE) {
@@ -627,6 +639,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.vertexPipelineStoresAndAtomics       = VK_TRUE;
 	graphics.sample_rate_shading_enabled                 = true;
 	device_features.shaderInt64 = VK_TRUE;
+	// Guest blend state can name SRC1 factors, which need dual-source blending.
+	device_features.dualSrcBlend = VK_TRUE;
 
 	vk::PhysicalDeviceRobustness2FeaturesEXT robustness2 {};
 #if defined(__APPLE__)

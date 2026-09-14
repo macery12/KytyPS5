@@ -39,6 +39,7 @@
 #include "libs/controller.h"
 #include "loader/systemContent.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <memory>
@@ -56,6 +57,14 @@
 #define KYTY_DBG_INPUT
 
 namespace Libs::Graphics {
+
+namespace {
+std::atomic<uint64_t> g_presented_frame_num {0};
+}
+
+uint64_t WindowGetPresentedFrameNum() noexcept {
+	return g_presented_frame_num.load(std::memory_order_relaxed);
+}
 
 struct EventKeyboard {
 	bool     down;
@@ -1006,6 +1015,7 @@ void WindowContext::UpdateTitle() {
 	const auto now       = Common::Timer::QueryPerformanceCounter();
 	const auto frequency = Common::Timer::QueryPerformanceFrequency();
 	frame_num++;
+	g_presented_frame_num.store(frame_num, std::memory_order_relaxed);
 	fps_frames++;
 	if (now - fps_start >= frequency) {
 		current_fps = static_cast<double>(fps_frames) * static_cast<double>(frequency) /

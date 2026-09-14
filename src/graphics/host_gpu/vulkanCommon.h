@@ -28,6 +28,34 @@ using VulkanMemoryBarrier = vk::MemoryBarrier;
 vk::Format  VulkanFormat(Prospero::BufferFormat guest_format);
 void        RequireVulkanSuccess(vk::Result result, const char* operation);
 
+class VulkanDebugLabelScope {
+public:
+	VulkanDebugLabelScope(vk::CommandBuffer command, const char* name): m_command(command) {
+		if (command == nullptr || name == nullptr ||
+		    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginDebugUtilsLabelEXT == nullptr ||
+		    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdEndDebugUtilsLabelEXT == nullptr) {
+			return;
+		}
+		vk::DebugUtilsLabelEXT label {};
+		label.pLabelName = name;
+		command.beginDebugUtilsLabelEXT(&label);
+		m_active = true;
+	}
+
+	~VulkanDebugLabelScope() {
+		if (m_active) {
+			m_command.endDebugUtilsLabelEXT();
+		}
+	}
+
+	VulkanDebugLabelScope(const VulkanDebugLabelScope&)            = delete;
+	VulkanDebugLabelScope& operator=(const VulkanDebugLabelScope&) = delete;
+
+private:
+	vk::CommandBuffer m_command = nullptr;
+	bool              m_active  = false;
+};
+
 template <typename Handle, typename... Args>
 void SetVulkanObjectNameF(vk::Device device, Handle handle, fmt::format_string<Args...> format,
                           Args&&... args) {

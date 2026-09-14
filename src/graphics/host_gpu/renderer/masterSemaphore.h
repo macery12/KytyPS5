@@ -5,6 +5,9 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
+#include <array>
+#include <cstddef>
+#include <mutex>
 
 namespace Libs::Graphics {
 
@@ -30,12 +33,30 @@ public:
 
 	void Refresh();
 	void Wait(uint64_t tick);
+	void RecordSubmission(uint64_t tick, uint32_t op, uint64_t submit_id, uint32_t arg0,
+	                      uint32_t arg1, uint32_t arg2, uint32_t arg3, uint64_t arg4,
+	                      const uint64_t* shaders, uint32_t shader_count);
 
 private:
+	static constexpr size_t MaxShaders = 8;
+	struct SubmissionDebug {
+		uint64_t tick = 0;
+		uint64_t submit_id = 0;
+		uint64_t arg4 = 0;
+		uint32_t op = 0;
+		uint32_t args[4] {};
+		std::array<uint64_t, MaxShaders> shaders {};
+		uint32_t shader_count = 0;
+	};
+	void DumpRecentSubmissions(uint64_t known_tick);
+	static constexpr size_t HistorySize = 512;
 	GraphicContext&       m_graphics;
 	vk::Semaphore         m_semaphore = nullptr;
 	std::atomic<uint64_t> m_gpu_tick {0};
 	std::atomic<uint64_t> m_current_tick {1};
+	std::mutex m_history_mutex;
+	std::array<SubmissionDebug, HistorySize> m_history {};
+	size_t m_history_next = 0;
 };
 
 } // namespace Libs::Graphics

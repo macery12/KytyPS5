@@ -4545,6 +4545,54 @@ public:
                       vk::Format::eR8G8B8A8Srgb,
               "registered compatible backing did not reuse one ImageId");
 
+      // A raw 128-bit storage descriptor can address the same bytes as BC6H blocks.
+      // On hosts without BC storage usage, the cache must switch representations.
+      constexpr uint64_t block_alias_offset = 0x2700000;
+      std::memset(memory + block_alias_offset, 0, 16);
+      auto block_sampled = sampled;
+      block_sampled.info.data = {base + block_alias_offset, 16};
+      block_sampled.info.pixel_format = vk::Format::eBc6HUfloatBlock;
+      block_sampled.info.guest_format = Prospero::BufferFormat::kBc6UFloat;
+      block_sampled.info.extent = {1, 1, 1};
+      block_sampled.info.pitch = 1;
+      block_sampled.info.bytes_per_block = 16;
+      block_sampled.info.mip_layout[0] = {0, 16, 1, 1};
+      block_sampled.view_info.format = block_sampled.info.pixel_format;
+      const auto block_id = texture_cache.FindImage(block_sampled);
+      Require(name, "BC sampled image", block_id &&
+                  texture_cache.GetImage(block_id).backing.format ==
+                      vk::Format::eBc6HUfloatBlock,
+              "BC6H image was not created for sampling");
+
+      auto raw_storage = block_sampled;
+      raw_storage.type = BindingType::Storage;
+      raw_storage.info.pixel_format = vk::Format::eR32G32B32A32Uint;
+      raw_storage.info.guest_format = Prospero::BufferFormat::k32_32_32_32UInt;
+      raw_storage.info.extent = {1, 1, 1};
+      raw_storage.info.pitch = 1;
+      raw_storage.view_info.format = raw_storage.info.pixel_format;
+      raw_storage.view_info.usage = vk::ImageUsageFlagBits::eStorage;
+      const auto raw_id = texture_cache.FindImage(raw_storage);
+      Require(name, "BC to raw storage alias",
+              raw_id && raw_id != block_id &&
+                  !TextureCacheTestAccess::Contains(texture_cache, block_id) &&
+                  texture_cache.GetImage(raw_id).backing.format ==
+                      vk::Format::eR32G32B32A32Uint &&
+                  (texture_cache.GetImage(raw_id).backing.usage &
+                   vk::ImageUsageFlagBits::eStorage),
+              "raw storage descriptor reused a BC image without storage usage");
+      Require(name, "raw storage view", texture_cache.FindTexture(raw_id, raw_storage) != nullptr,
+              "raw block alias could not create its storage view");
+
+      auto block_again = block_sampled;
+      const auto block_again_id = texture_cache.FindImage(block_again);
+      Require(name, "raw to BC sampled alias",
+              block_again_id && block_again_id != raw_id &&
+                  !TextureCacheTestAccess::Contains(texture_cache, raw_id) &&
+                  texture_cache.GetImage(block_again_id).backing.format ==
+                      vk::Format::eBc6HUfloatBlock,
+              "raw block writes could not return to a compressed sampling image");
+
       const auto IsOnlyImage = [](const std::vector<ImageId> &ids,
                                   ImageId expected) {
         return ids.size() == 1 && ids.front() == expected;
@@ -18117,6 +18165,33 @@ TestCase VectorPermlanex16() {
   return test;
 }
 
+TestCase VectorPermlanex16BoundControl() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 3, 0xffffffffu);
+  AppendVMovLiteral(&code, 4, 0xffffffffu);
+  code.push_back(EncodeVop2(0x1a, 2, InlineU32(2), 0));
+  AppendVMovLiteral(&code, 5, 0xfeedbabeu);
+  AppendVop3(&code, 0x378, 1, Vgpr(5), Vgpr(3), Vgpr(4), 0, 2);
+  AppendBufferStoreDword(&code, 1, 2);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "VectorPermlanex16BoundControl";
+  test.code = code;
+  test.expected = std::vector<u32>(32, 0xfeedbabeu);
+  std::fill(test.expected.begin(), test.expected.begin() + 16, 0u);
+  test.opcodes = {O::V_MOV_B32, O::V_PERMLANEX16_B32, O::V_LSHLREV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = 32;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase VectorPermlane16FetchInactiveZero() {
   using O = ShaderOpcode;
 
@@ -25084,6 +25159,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorReadlaneFromInactiveWrittenLane);
   AddCase(VectorLaneWave32RuntimeSelectorWraps);
   AddCase(VectorPermlanex16);
+  AddCase(VectorPermlanex16BoundControl);
   AddCase(VectorPermlane16FetchInactiveZero);
   AddCase(VectorPermlane16FetchInactiveFi);
   AddCase(VectorDppQuadPermuteReverse);

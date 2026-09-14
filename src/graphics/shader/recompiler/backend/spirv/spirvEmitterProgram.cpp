@@ -4,14 +4,63 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <optional>
+#include <string>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
+
+// Loop guard (KYTY_SHADER_LOOP_LIMIT=<n>, default 4096, 0 disables): each invocation gets a
+// budget of loop-header visits shared by all of its loops. Once it is spent, guarded headers
+// leave their loop, so a runaway guest loop (for example one bounded by a wrong lane prefix sum)
+// produces wrong output instead of a GPU hang. Only headers that already branch to their merge
+// block are guarded, so no CFG edge or phi entry is added. It is on by default because NHL 26
+// hangs the GPU in several shaders without it (3b25cdb347182b6d, 613d940c02920148,
+// 8d295cd700d92594). If a hang persists with the guard armed, it is not a runaway loop.
+uint32_t LoopGuardLimitFromEnvironment() {
+	static const uint32_t limit = [] {
+		constexpr uint32_t default_limit = 4096;
+		const char*        value         = std::getenv("KYTY_SHADER_LOOP_LIMIT");
+		if (value == nullptr || *value == '\0') {
+			return default_limit;
+		}
+		char*      end    = nullptr;
+		const auto parsed = std::strtoull(value, &end, 0);
+		if (end != value && *end == '\0' && parsed == 0) {
+			std::printf("Diagnostic: shader loop guard disabled\n");
+			std::fflush(stdout);
+			return 0u;
+		}
+		if (end == value || *end != '\0' || parsed > UINT32_MAX) {
+			std::printf("Diagnostic: ignoring invalid KYTY_SHADER_LOOP_LIMIT\n");
+			std::fflush(stdout);
+			return 0u;
+		}
+		std::printf("Diagnostic: shader loop guard armed, limit=%llu header visits per invocation\n",
+		            static_cast<unsigned long long>(parsed));
+		std::fflush(stdout);
+		return static_cast<uint32_t>(parsed);
+	}();
+	return limit;
+}
+
+uint32_t EmitLoopGuardTripped(EmitterState& state) {
+	const auto count = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), count, state.loop_guard_variable);
+	const auto next = EmitAddU32(state, count, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpStore, state.loop_guard_variable, next);
+	const auto tripped = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), tripped, next,
+	                          ConstantU32(state, state.loop_guard_limit));
+	return tripped;
+}
 
 void EmitKillIfBoolFalse(EmitterState& state, uint32_t active) {
 	const auto kill_label  = state.builder.AllocateId();
@@ -160,7 +209,29 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,
 				EmitReturn(ctx);
 				return;
 			}
-			const auto condition = BranchCondition(ctx, info);
+			auto       condition = BranchCondition(ctx, info);
+			const auto is_exit   = [&](uint32_t id) {
+				return std::ranges::find(ctx.state.loop_guard_exits, id) !=
+				       ctx.state.loop_guard_exits.end();
+			};
+			// Guard every existing edge that leaves a loop (header, body break, or latch), so a
+			// loop whose exit test is not in the header block is still bounded.
+			if (ctx.state.loop_guard_variable != 0 &&
+			    is_exit(term.true_block) != is_exit(term.false_block)) {
+				const auto tripped = EmitLoopGuardTripped(ctx.state);
+				const auto guarded = ctx.state.builder.AllocateId();
+				if (is_exit(term.true_block)) {
+					ctx.state.builder.AddFunction(spv::OpLogicalOr, TypeBool(ctx.state), guarded,
+					                              condition, tripped);
+				} else {
+					const auto running = ctx.state.builder.AllocateId();
+					ctx.state.builder.AddFunction(spv::OpLogicalNot, TypeBool(ctx.state), running,
+					                              tripped);
+					ctx.state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(ctx.state), guarded,
+					                              condition, running);
+				}
+				condition = guarded;
+			}
 			emit_merge();
 			ctx.state.builder.AddFunction(spv::OpBranchConditional, condition,
 			                              ctx.Label(true_block), ctx.Label(false_block));
@@ -388,9 +459,15 @@ void EmitDispatcherFunction(ValueEmitContext& ctx, const DispatcherFunctionState
 	const auto next_pc = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpPhi, TypeU32(state), pc, initial_pc, initial_parent, next_pc,
 	                          dispatcher.continue_label);
-	const auto done = state.builder.AllocateId();
+	auto done = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), done, pc,
 	                          ConstantU32(ctx.state, UINT32_MAX));
+	if (state.loop_guard_variable != 0) {
+		const auto guarded = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalOr, TypeBool(state), guarded, done,
+		                          EmitLoopGuardTripped(state));
+		done = guarded;
+	}
 	state.builder.AddFunction(spv::OpLoopMerge, dispatcher.merge_label, dispatcher.continue_label,
 	                          spv::LoopControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, done, dispatcher.merge_label,
@@ -715,10 +792,51 @@ void EmitProgram(EmitterState& state) {
 			break;
 		}
 	}
+	// KYTY_SHADER_LOOP_GUARD_HASHES=<hash>[,<hash>...] restricts the loop guard to the listed shaders.
+	// The shared per-invocation budget also truncates legitimate nested loops (NHL 26's cloth
+	// constraint solver 523e815d5f8ad134 runs iterations x constraints x neighbours between
+	// barriers), which desynchronizes lanes and poisons simulated vertices with NaN.
+	static const std::vector<uint64_t> guard_hashes = [] {
+		std::vector<uint64_t> list;
+		if (const char* value = std::getenv("KYTY_SHADER_LOOP_GUARD_HASHES"); value != nullptr) {
+			std::string text(value);
+			for (size_t start = 0; start < text.size();) {
+				const auto end  = text.find(',', start);
+				const auto item = text.substr(start, end == std::string::npos ? end : end - start);
+				if (!item.empty()) {
+					list.push_back(std::strtoull(item.c_str(), nullptr, 16));
+				}
+				if (end == std::string::npos) {
+					break;
+				}
+				start = end + 1;
+			}
+		}
+		return list;
+	}();
+	const bool guard_selected =
+	    guard_hashes.empty() ||
+	    std::ranges::find(guard_hashes, state.program.shader_hash) != guard_hashes.end();
+	if (const auto limit = LoopGuardLimitFromEnvironment(); limit != 0 && guard_selected) {
+		state.loop_guard_variable = state.builder.AllocateId();
+		state.loop_guard_limit    = limit;
+		state.loop_guard_exits.clear();
+		for (const auto& info: program.block_info) {
+			if (info.terminator.loop_header && info.terminator.merge_block != UINT32_MAX) {
+				state.loop_guard_exits.push_back(info.terminator.merge_block);
+			}
+		}
+	}
 	state.builder.AddFunction(spv::OpFunction, TypeVoid(state),
 	                          state.mesh_guest_func != 0 ? state.mesh_guest_func : state.main_func,
 	                          spv::FunctionControlMaskNone, TypeFunction(state));
 	EmitLabel(state, state.entry_label);
+	if (state.loop_guard_variable != 0) {
+		state.builder.AddFunction(spv::OpVariable,
+		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+		                          state.loop_guard_variable, spv::StorageClassFunction,
+		                          ConstantU32(state, 0));
+	}
 	if (state.requirements.function_lds) {
 		state.builder.AddFunction(
 		    spv::OpVariable,

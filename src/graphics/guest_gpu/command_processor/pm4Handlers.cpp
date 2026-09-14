@@ -3714,6 +3714,15 @@ void GraphicsInitJmpTablesShIndirect() {
 		cp.GetShCtx().SetLsShaderBase(base);
 	};
 
+	// LS resource registers mirror SPI_SHADER_PGM_RSRC1/2_HS (0x10A/0x10B), which are stored but
+	// not consumed by shader setup. NHL 26 writes RSRC1_LS indirectly when entering a match.
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_LS] = [](KYTY_HW_SH_INDIRECT_ARGS) {
+		HwShIgnoreShaderRegister(cmd_offset, value);
+	};
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC2_LS] = [](KYTY_HW_SH_INDIRECT_ARGS) {
+		HwShIgnoreShaderRegister(cmd_offset, value);
+	};
+
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_LO_ES] = [](KYTY_HW_SH_INDIRECT_ARGS) {
 		auto base = cp.GetShCtx().GetVs().es_regs.data_addr;
 		base &= 0xFFFFFF00000000FFull;

@@ -130,8 +130,8 @@ public:
 	                    const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
 	                    const HW::Context& context, const HW::UserConfig& user_config,
 	                    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
-	                    bool pixel_active, ShaderVertexInputInfo& vertex_info,
-	                    ShaderPixelInputInfo& pixel_info);
+	                    bool pixel_active, bool dual_source_blend,
+	                    ShaderVertexInputInfo& vertex_info, ShaderPixelInputInfo& pixel_info);
 	ShaderProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo&      input_info);

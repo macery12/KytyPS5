@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -26,6 +27,14 @@
 namespace Libs::Audio {
 
 namespace {
+
+bool StartupTraceEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_TRACE_STARTUP");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
 
 constexpr int AUDIO_OUT_PORT_TYPE_MAIN      = 0;
 constexpr int AUDIO_OUT_PORT_TYPE_BGM       = 1;
@@ -407,7 +416,28 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 
 	if (SDL_QueueAudio(port->audio_device, queue_data, queue_size) < 0) {
 		LOGF("AudioOut: SDL_QueueAudio failed: %s\n", SDL_GetError());
+		if (StartupTraceEnabled()) {
+			std::printf("Startup trace: SDL_QueueAudio failed: %s\n", SDL_GetError());
+			std::fflush(stdout);
+		}
 		return false;
+	}
+	if (StartupTraceEnabled()) {
+		static std::atomic<bool> first_queue_logged {false};
+		static std::atomic<bool> nonzero_logged {false};
+		const auto* bytes = static_cast<const uint8_t*>(queue_data);
+		const bool  nonzero = !nonzero_logged.load(std::memory_order_relaxed) &&
+		                      std::any_of(bytes, bytes + queue_size, [](uint8_t byte) {
+			                      return byte != 0;
+		                      });
+		const bool first_queue = !first_queue_logged.exchange(true, std::memory_order_relaxed);
+		const bool first_nonzero =
+		    nonzero && !nonzero_logged.exchange(true, std::memory_order_relaxed);
+		if (first_queue || first_nonzero) {
+			std::printf("Startup trace: audio queued device=%u bytes=%u nonzero=%u\n",
+			            port->audio_device, queue_size, nonzero ? 1u : 0u);
+			std::fflush(stdout);
+		}
 	}
 
 	return true;
@@ -446,6 +476,11 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 
 			if (type != AUDIO_OUT_PORT_TYPE_VIBRATION) {
 				OpenSdlDevice(&port);
+			}
+			if (StartupTraceEnabled()) {
+				std::printf("Startup trace: audio port opened type=%d device=%u samples=%u\n",
+				            type, port.audio_device, samples_num);
+				std::fflush(stdout);
 			}
 
 			return Id::Create(id);

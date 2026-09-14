@@ -4,6 +4,8 @@
 #include "common/abi.h"
 #include "common/common.h"
 
+#include <cstdint>
+
 namespace Libs::Graphics {
 
 class Presenter;
@@ -11,6 +13,7 @@ class Presenter;
 [[nodiscard]] Presenter& WindowInit(uint32_t width, uint32_t height);
 void                     WindowRun();
 void                     WindowShutdown();
+[[nodiscard]] uint64_t   WindowGetPresentedFrameNum() noexcept;
 
 } // namespace Libs::Graphics
 

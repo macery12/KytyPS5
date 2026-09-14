@@ -638,12 +638,6 @@ static void KYTY_SYSV_ABI JsonValueDtor(void* self) {
 	JsonValueClear(reinterpret_cast<JsonValue*>(self));
 }
 
-static void KYTY_SYSV_ABI JsonValueClearMethod(JsonValue* self) {
-	PRINT_NAME();
-
-	JsonValueClear(self);
-}
-
 static JsonValue* KYTY_SYSV_ABI JsonValueAssign(JsonValue* self, const JsonValue* src) {
 	PRINT_NAME();
 
@@ -1112,7 +1106,6 @@ LIB_DEFINE(InitNet_1_Json2) {
 	LIB_FUNC("RBw+4NukeGQ", LibJson2::JsonValueCount);
 	LIB_FUNC("+drDFyAS6u4", LibJson2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", LibJson2::JsonInitializerSetGlobalNullAccessCallback);
-	LIB_FUNC("FIjXN2TkuTs", LibJson2::JsonValueClearMethod);
 }
 
 } // namespace LibJson2

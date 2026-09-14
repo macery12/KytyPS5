@@ -812,6 +812,64 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		std::printf("--- Guest fault context ---\n");
 		std::printf("thread: %s\n", thread_name);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		// The exception PC is often in a host DLL. Record its image and offset so
+		// a later crash can be attributed even when the process exits before WER
+		// creates an event or dump.
+		MEMORY_BASIC_INFORMATION fault_region {};
+		if (VirtualQuery(reinterpret_cast<const void*>(info->exception_address),
+		                 &fault_region, sizeof(fault_region)) != 0 &&
+		    fault_region.Type == MEM_IMAGE) {
+			char module_path[MAX_PATH] {};
+			const DWORD length = GetModuleFileNameA(
+			    static_cast<HMODULE>(fault_region.AllocationBase), module_path, MAX_PATH);
+			if (length != 0) {
+				std::printf("fault module: %.*s base=0x%016" PRIx64
+				            " offset=0x%" PRIx64 "\n", static_cast<int>(length),
+				            module_path,
+				            reinterpret_cast<uint64_t>(fault_region.AllocationBase),
+				            info->exception_address -
+				                reinterpret_cast<uint64_t>(fault_region.AllocationBase));
+			}
+		}
+		if (info->native_context != nullptr) {
+			// Unwind the faulting thread, not this exception handler's own stack.
+			// Module offsets remain useful when the driver has no public symbols.
+			CONTEXT context = *static_cast<const CONTEXT*>(info->native_context);
+			std::printf("host call stack:\n");
+			for (unsigned frame = 0; frame < 16 && context.Rip != 0; ++frame) {
+				MEMORY_BASIC_INFORMATION region {};
+				if (VirtualQuery(reinterpret_cast<const void*>(context.Rip), &region,
+				                 sizeof(region)) == 0 || region.Type != MEM_IMAGE) {
+					break;
+				}
+				char module_path[MAX_PATH] {};
+				const DWORD length = GetModuleFileNameA(
+				    static_cast<HMODULE>(region.AllocationBase), module_path, MAX_PATH);
+				const char* module_name = length != 0 ? std::strrchr(module_path, '\\') : nullptr;
+				module_name = module_name != nullptr ? module_name + 1 : module_path;
+				std::printf("  #%u %s+0x%" PRIx64 "\n", frame,
+				            length != 0 ? module_name : "?",
+				            context.Rip - reinterpret_cast<uint64_t>(region.AllocationBase));
+				const DWORD64 old_rip = context.Rip;
+				const DWORD64 old_rsp = context.Rsp;
+				DWORD64 image_base = 0;
+				auto* entry = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+				if (entry != nullptr) {
+					PVOID handler_data = nullptr;
+					DWORD64 establisher_frame = 0;
+					RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context,
+					                 &handler_data, &establisher_frame, nullptr);
+				} else {
+					// Leaf functions have no unwind entry; their return address is at RSP.
+					if (!IsReadableRange(context.Rsp, sizeof(DWORD64))) break;
+					context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+					context.Rsp += sizeof(DWORD64);
+				}
+				if (context.Rip == old_rip || context.Rsp <= old_rsp) break;
+			}
+		}
+#endif
 		std::printf("rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
 		            "rsi=%016" PRIx64 " rdi=%016" PRIx64 " rbp=%016" PRIx64 " rsp=%016" PRIx64 "\n"
 		            "r8 =%016" PRIx64 " r9 =%016" PRIx64 " r10=%016" PRIx64 " r11=%016" PRIx64 "\n"

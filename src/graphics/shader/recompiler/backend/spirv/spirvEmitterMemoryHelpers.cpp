@@ -281,6 +281,67 @@ uint32_t NormalizeFormatComponent(EmitterState& state, const Format::BufferForma
 	}
 }
 
+uint32_t DenormalizeFormatComponent(EmitterState& state, const Format::BufferFormatInfo& info,
+                                    uint32_t component, uint32_t value) {
+	const auto bits = info.component_bits[component];
+	const auto glsl = [&](uint32_t type, uint32_t op, std::initializer_list<uint32_t> args) {
+		const auto            result = state.builder.AllocateId();
+		std::vector<uint32_t> words {spv::OpExtInst, type, result, GlslStd450(state), op};
+		words.insert(words.end(), args.begin(), args.end());
+		state.builder.AddFunction(words);
+		return result;
+	};
+	switch (info.type) {
+		case Format::ComponentType::Uint:
+		case Format::ComponentType::Sint: return value;
+		case Format::ComponentType::Uscaled: {
+			const auto converted = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertFToU, TypeU32(state), converted,
+			                          EmitBitcastU32ToF32(state, value));
+			return converted;
+		}
+		case Format::ComponentType::Sscaled: {
+			const auto converted = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertFToS, TypeI32(state), converted,
+			                          EmitBitcastU32ToF32(state, value));
+			return Unary(state, spv::OpBitcast, TypeU32(state), converted);
+		}
+		case Format::ComponentType::Unorm: {
+			const auto max_value = static_cast<float>((1u << bits) - 1u);
+			const auto clamped   = glsl(TypeF32(state), GLSLstd450FClamp,
+			                            {EmitBitcastU32ToF32(state, value), ConstantF32Value(state, 0.0f),
+			                             ConstantF32Value(state, 1.0f)});
+			const auto scaled    = Binary(state, spv::OpFMul, TypeF32(state), clamped,
+			                              ConstantF32Value(state, max_value));
+			const auto rounded   = glsl(TypeF32(state), GLSLstd450Round, {scaled});
+			const auto converted = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertFToU, TypeU32(state), converted, rounded);
+			return converted;
+		}
+		case Format::ComponentType::Snorm: {
+			const auto max_value = static_cast<float>((1u << (bits - 1u)) - 1u);
+			const auto clamped   = glsl(TypeF32(state), GLSLstd450FClamp,
+			                            {EmitBitcastU32ToF32(state, value), ConstantF32Value(state, -1.0f),
+			                             ConstantF32Value(state, 1.0f)});
+			const auto scaled    = Binary(state, spv::OpFMul, TypeF32(state), clamped,
+			                              ConstantF32Value(state, max_value));
+			const auto rounded   = glsl(TypeF32(state), GLSLstd450Round, {scaled});
+			const auto converted = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertFToS, TypeI32(state), converted, rounded);
+			return Unary(state, spv::OpBitcast, TypeU32(state), converted);
+		}
+		case Format::ComponentType::Float:
+			// Half floats must be encoded; storing the low 16 bits of the float32 word produced
+			// random half NaNs (NHL 26 cloth collision displacement, CS 4cf36125482cd224).
+			if (bits == 16u) {
+				return EmitF32ToF16RtzBits(state, EmitBitcastU32ToF32(state, value));
+			}
+			// 32-bit floats are stored as-is; unsigned 10/11-bit floats are not encoded yet.
+			return value;
+		default: return value;
+	}
+}
+
 void EmitDeviceAtomicMemoryBarrier(EmitterState& state) {
 	const auto semantics =
 	    spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsUniformMemoryMask;

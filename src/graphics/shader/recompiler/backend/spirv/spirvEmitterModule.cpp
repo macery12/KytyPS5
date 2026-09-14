@@ -530,6 +530,10 @@ void DefineOutputs(EmitterState& state) {
 				                                              binding.debug_name.c_str());
 				state.builder.AddAnnotation(spv::OpDecorate, binding.variable_id,
 				                            spv::DecorationLocation, binding.location);
+				if (binding.blend_index != 0) {
+					state.builder.AddAnnotation(spv::OpDecorate, binding.variable_id,
+					                            spv::DecorationIndex, binding.blend_index);
+				}
 				break;
 			}
 		}

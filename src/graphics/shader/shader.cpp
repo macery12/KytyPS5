@@ -20,6 +20,7 @@
 #include <atomic>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -87,6 +88,7 @@ static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
 	}
 
 	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
+	std::abort();
 }
 
 static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code) {
@@ -712,6 +714,7 @@ void BuildStageStaticKey(const ShaderPixelInputInfo& info, std::vector<uint32_t>
 	key.push_back(static_cast<uint32_t>(info.ps_depth_export_enable));
 	key.push_back(static_cast<uint32_t>(info.ps_sample_mask_export_enable));
 	key.push_back(static_cast<uint32_t>(info.ps_early_z));
+	key.push_back(static_cast<uint32_t>(info.ps_dual_source_blend));
 	key.insert(key.end(), std::begin(info.target_output_mode), std::end(info.target_output_mode));
 	for (uint32_t base = 0; base < info.target_export_mapping.size(); base += 4u) {
 		uint32_t packed = 0;

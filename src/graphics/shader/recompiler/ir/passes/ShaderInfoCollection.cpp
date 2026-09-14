@@ -34,9 +34,9 @@ bool HasOutput(const ShaderInfo& info, StageOutputKind kind, uint32_t index) {
 }
 
 void AddOutput(ShaderInfo& info, StageOutputKind kind, uint32_t index, uint32_t location,
-               std::string name) {
+               std::string name, uint32_t blend_index = 0) {
 	if (!HasOutput(info, kind, index)) {
-		info.outputs.push_back({kind, index, location, std::move(name)});
+		info.outputs.push_back({kind, index, location, std::move(name), blend_index});
 	}
 }
 
@@ -350,10 +350,19 @@ void CollectOutputs(const Program& program, ShaderStageInputInfo input_info, Sha
 					AddOutput(info, StageOutputKind::Parameter, export_info.index,
 					          export_info.index, fmt::format("out_param_{}", export_info.index));
 					break;
-				case ExportTargetKind::Mrt:
-					AddOutput(info, StageOutputKind::Mrt, export_info.index, export_info.index,
-					          fmt::format("out_mrt_{}", export_info.index));
+				case ExportTargetKind::Mrt: {
+					// Dual-source blending feeds one attachment from MRT0 and MRT1, so both
+					// exports live at location 0 and are told apart by their Index decoration.
+					const bool dual_source = program.stage == ShaderType::Pixel &&
+					                         input_info.pixel != nullptr &&
+					                         input_info.pixel->ps_dual_source_blend &&
+					                         export_info.index < 2;
+					AddOutput(info, StageOutputKind::Mrt, export_info.index,
+					          dual_source ? 0 : export_info.index,
+					          fmt::format("out_mrt_{}", export_info.index),
+					          dual_source ? export_info.index : 0);
 					break;
+				}
 				default: break;
 			}
 		}

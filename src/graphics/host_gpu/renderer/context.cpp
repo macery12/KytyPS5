@@ -35,6 +35,7 @@ void CommandBuffer::Begin() {
 	vk::CommandBufferBeginInfo begin_info {};
 	begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
 
+	m_debug_shader_count = 0;
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
@@ -58,6 +59,23 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 	m_debug_arg2      = arg2;
 	m_debug_arg3      = arg3;
 	m_debug_arg4      = arg4;
+}
+
+void CommandBuffer::NoteDebugShader(uint64_t hash) noexcept {
+	if (hash == 0) {
+		return;
+	}
+	const auto end = m_debug_shaders.begin() + m_debug_shader_count;
+	if (std::find(m_debug_shaders.begin(), end, hash) != end) {
+		return;
+	}
+	if (m_debug_shader_count < m_debug_shaders.size()) {
+		m_debug_shaders[m_debug_shader_count++] = hash;
+	} else {
+		// Keep the most recent shaders: the hang is usually in the last ones recorded.
+		std::move(m_debug_shaders.begin() + 1, m_debug_shaders.end(), m_debug_shaders.begin());
+		m_debug_shaders.back() = hash;
+	}
 }
 
 void CommandBuffer::BeginRendering(const RenderState& state) const {

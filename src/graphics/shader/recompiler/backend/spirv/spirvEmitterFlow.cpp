@@ -559,21 +559,44 @@ uint32_t EmitUndefU1(EmitterState& state, const IR::Inst& inst) {
 	return result;
 }
 
+// A PS5 fragment wave always has all of its lanes: uncovered pixels exist with exec cleared, and
+// guest code may force them active (S_ORN2_SAVEEXEC) so they hold neutral values for a reduction.
+// A Vulkan fragment subgroup omits uncovered pixels entirely, so a read from such a lane is either
+// undefined or zeroed by the inactive-lane rule. A zero poisons a min over the wave, and NHL 26's
+// clustered-light pixel shader then waits forever for a lane to advance (GPU hang). Keep the
+// reading lane's own value for a valid but missing lane; that is neutral for lane reductions.
+// Compute waves are unaffected.
+static uint32_t KeepOwnValueForMissingPixelLane(ValueEmitContext& ctx, const IR::Inst& inst,
+                                                size_t index, uint32_t lane, uint32_t valid,
+                                                uint32_t fetched) {
+	auto& state = ctx.state;
+	if (state.program.stage != ShaderType::Pixel || state.lane_count != 1) {
+		return fetched;
+	}
+	const auto live    = EmitSubgroupLaneActiveBool(state, lane);
+	const auto dead    = state.builder.AllocateId();
+	const auto missing = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), dead, live);
+	state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), missing, valid, dead);
+	return EmitNative<spv::OpSelect, IR::Type::U32>(state, missing, ctx.Arg(inst, index), fetched);
+}
+
 uint32_t EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto flags    = inst.Flags<IR::DppMoveFlags>();
 	const auto target   = EmitDppTargetLane(state, flags.control);
 	const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
 	if (flags.fetch_inactive) {
-		return shuffled;
+		return KeepOwnValueForMissingPixelLane(ctx, inst, 0, target.lane, target.valid, shuffled);
 	}
 	const auto ballot        = ctx.Ballot(inst.Arg(1));
 	const auto source_active = EmitBallotLaneActiveBool(state, ballot, target.lane);
 	const auto can_fetch     = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), can_fetch, target.valid,
 	                          source_active);
-	return EmitNative<spv::OpSelect, IR::Type::U32>(ctx.state, can_fetch, shuffled,
-	                                                ConstantU32(state, 0));
+	const auto fetched = EmitNative<spv::OpSelect, IR::Type::U32>(ctx.state, can_fetch, shuffled,
+	                                                              ConstantU32(state, 0));
+	return KeepOwnValueForMissingPixelLane(ctx, inst, 0, target.lane, target.valid, fetched);
 }
 
 uint32_t EmitDppUpdateU32(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -594,7 +617,9 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 }
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return ctx.Shuffle(inst, 0, ctx.Arg(inst, 1));
+	const auto lane = ctx.Arg(inst, 1);
+	return KeepOwnValueForMissingPixelLane(ctx, inst, 0, lane, ConstantBool(ctx.state, true),
+	                                       ctx.Shuffle(inst, 0, lane));
 }
 
 uint32_t EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -650,7 +675,23 @@ uint32_t EmitPermlane16U32(ValueEmitContext& ctx, const IR::Inst& inst) {
 		state.builder.AddFunction(spv::OpSelect, TypeU32(state), result, source_exec, shuffled,
 		                          ConstantU32(state, 0));
 	}
-	return result;
+	auto valid = ConstantBool(state, true);
+	if (flags.x16 && flags.bound_control) {
+		// Bound control only fetches from the lower row of a row pair; the upper-row fetch of
+		// rows 0 and 2 reads 0. Prefix sums rely on it: row 1 adds row 0's total, row 0 adds
+		// nothing (NHL 26 CS 3b25cdb347182b6d at 0x9d8).
+		const auto row_bit = state.builder.AllocateId();
+		valid              = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpBitwiseAnd, TypeU32(state), row_bit, subid,
+		                          ConstantU32(state, 16));
+		state.builder.AddFunction(spv::OpINotEqual, TypeBool(state), valid, row_bit,
+		                          ConstantU32(state, 0));
+		const auto bounded = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpSelect, TypeU32(state), bounded, valid, result,
+		                          ConstantU32(state, 0));
+		result = bounded;
+	}
+	return KeepOwnValueForMissingPixelLane(ctx, inst, 0, target, valid, result);
 }
 
 uint32_t EmitGetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {

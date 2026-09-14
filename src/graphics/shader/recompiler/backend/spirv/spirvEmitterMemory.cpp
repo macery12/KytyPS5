@@ -525,10 +525,11 @@ void FormattedStorePrepared(ValueEmitContext& ctx, const IR::Inst& inst, const I
 	if (component >= info.component_count) return;
 	const auto bits          = info.component_bits[component];
 	const auto component_mem = RebaseFormattedComponent(mem, info, component);
+	const auto encoded       = DenormalizeFormatComponent(ctx.state, info, component, data);
 	if (bits == 8u || bits == 16u) {
-		StoreSubwordPrepared(ctx, inst, component_mem, resource, bits, data);
+		StoreSubwordPrepared(ctx, inst, component_mem, resource, bits, encoded);
 	} else {
-		StoreWordPrepared(ctx, inst, component_mem, resource, data);
+		StoreWordPrepared(ctx, inst, component_mem, resource, encoded);
 	}
 }
 
@@ -728,12 +729,13 @@ void StoreFormattedInBounds(ValueEmitContext& ctx, const IR::MemoryInfo& mem,
                             const PreparedFormattedMemory& plan, uint32_t component,
                             uint32_t data) {
 	if (component >= plan.info.component_count) return;
-	const auto bits = plan.info.component_bits[component];
+	const auto bits    = plan.info.component_bits[component];
+	const auto encoded = DenormalizeFormatComponent(ctx.state, plan.info, component, data);
 	if (bits == 8u || bits == 16u) {
 		StoreSubwordInBounds(ctx, mem, plan.resource, plan.addresses[component],
-		                     plan.indices[component], bits, data);
+		                     plan.indices[component], bits, encoded);
 	} else {
-		StoreWordInBounds(ctx, plan.resource, plan.indices[component], data);
+		StoreWordInBounds(ctx, plan.resource, plan.indices[component], encoded);
 	}
 }
 

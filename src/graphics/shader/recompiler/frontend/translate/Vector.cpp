@@ -1,5 +1,9 @@
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 namespace Libs::Graphics::ShaderRecompiler::Frontend {
 
 bool Translator::EmitVector(const Decoder::Instruction& inst) {
@@ -39,6 +43,22 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual32, IR::Type::U32, false, false);
 			return true;
 		case O::V_CMPX_NE_U32:
+			// Workaround (default on, KYTY_FORCE_UI_MASK=0 disables): bypass only the final
+			// compositor's per-pixel UI mask. The UI image fetch at 0x7ec is otherwise skipped when
+			// this mask is zero, and the mask producer is not emulated correctly yet.
+			if (program.shader_hash == 0xd8ad62a44c60a9a3ull && inst.pc == 0x7b8u) {
+				static const bool force_ui_mask = [] {
+					const char* value = std::getenv("KYTY_FORCE_UI_MASK");
+					return value == nullptr || std::strcmp(value, "0") != 0;
+				}();
+				if (force_ui_mask) {
+					std::printf("Diagnostic: forcing NHL 26 compositor UI mask\n");
+					std::fflush(stdout);
+					EmitCompareConstant(inst, true, false, true);
+					return true;
+				}
+			}
+			[[fallthrough]];
 		case O::V_CMPX_NE_I32:
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual32, IR::Type::U32, false, true);
 			return true;

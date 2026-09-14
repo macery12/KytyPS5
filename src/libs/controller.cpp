@@ -13,6 +13,9 @@
 #include "libs/padData.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -25,6 +28,59 @@ constexpr int PAD_ERROR_INVALID_HANDLE = -2137915389; /* 0x80920003 */
 
 constexpr uint32_t RUMBLE_DURATION_MS = 0xffff;
 constexpr uint32_t RELEASE_FLUSH_MS   = 50;
+
+static bool StartupTraceEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_TRACE_STARTUP");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
+static std::atomic<uint64_t> g_traced_pad_reads {0};
+
+static void TraceGuestPadRead(const char* api, const PadData* data, int count) {
+	if (!StartupTraceEnabled()) {
+		return;
+	}
+	const auto reads = g_traced_pad_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+	uint32_t buttons = 0;
+	for (int i = 0; i < count; i++) {
+		buttons |= data[i].buttons;
+	}
+	static std::atomic<uint32_t> last_buttons {0};
+	const auto previous = last_buttons.exchange(buttons, std::memory_order_relaxed);
+	static std::atomic<uint32_t> logged {0};
+	if ((reads == 1 || buttons != previous) &&
+	    logged.fetch_add(1, std::memory_order_relaxed) < 24) {
+		std::printf("Startup trace: %s read=%llu connected=%u buttons=0x%08x\n", api,
+		            static_cast<unsigned long long>(reads), data[0].connected ? 1u : 0u, buttons);
+		std::fflush(stdout);
+	}
+}
+
+static void TracePadOpen(const char* api, int user_id, int type, int index, bool valid) {
+	if (!StartupTraceEnabled()) {
+		return;
+	}
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+		std::printf("Startup trace: %s user=%d type=%d index=%d valid=%u\n", api, user_id,
+		            type, index, valid ? 1u : 0u);
+		std::fflush(stdout);
+	}
+}
+
+static void TraceInvalidPadHandle(const char* api, int handle) {
+	if (!StartupTraceEnabled()) {
+		return;
+	}
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+		std::printf("Startup trace: %s invalid handle=%d\n", api, handle);
+		std::fflush(stdout);
+	}
+}
 
 struct PadControllerInformation {
 	float    touch_pixel_density;
@@ -333,6 +389,15 @@ void GameController::Button(int id, uint32_t button, bool down) {
 
 	// The keyboard shares the player-1 pad with the active gamepad.
 	if (m_active_id == id || id == HOST_INPUT_CONTROLLER_ID) {
+		if (StartupTraceEnabled() && down && button != 0) {
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+				std::printf("Startup trace: host button id=%d mask=0x%08x guest_pad_reads=%llu\n",
+				            id, button, static_cast<unsigned long long>(
+				                            g_traced_pad_reads.load(std::memory_order_relaxed)));
+				std::fflush(stdout);
+			}
+		}
 		m_state.time = LibKernel::KernelGetProcessTime();
 
 		m_state.buttons = down ? m_state.buttons | button : m_state.buttons & ~button;
@@ -612,7 +677,9 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param) {
 
 	constexpr int pad_error_invalid_arg = -2137915391; /* 0x80920001 */
 
-	if (!PadOpenArgsAreValid(user_id, type, index)) {
+	const bool valid = PadOpenArgsAreValid(user_id, type, index);
+	TracePadOpen("PadOpen", user_id, type, index, valid);
+	if (!valid) {
 		return pad_error_invalid_arg;
 	}
 
@@ -631,7 +698,9 @@ int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index) {
 
 	constexpr int pad_error_device_no_handle = -2137915384; /* 0x80920008 */
 
-	if (!PadOpenArgsAreValid(user_id, type, index)) {
+	const bool valid = PadOpenArgsAreValid(user_id, type, index);
+	TracePadOpen("PadGetHandle", user_id, type, index, valid);
+	if (!valid) {
 		return pad_error_device_no_handle;
 	}
 
@@ -706,6 +775,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PRINT_NAME();
 
 	if (handle != 1) {
+		TraceInvalidPadHandle("PadReadState", handle);
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 	if (data == nullptr) {
@@ -719,6 +789,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	g_controller->ReadState(&state, &connected, &connected_count);
 
 	pad_fill_data(data, state, connected, connected_count);
+	TraceGuestPadRead("PadReadState", data, 1);
 
 	return OK;
 }
@@ -728,6 +799,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 
 	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
 	if (handle != 1) {
+		TraceInvalidPadHandle("PadRead", handle);
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 	if (data == nullptr) {
@@ -752,6 +824,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
 	}
+	TraceGuestPadRead("PadRead", data, ret_num);
 
 	return ret_num;
 }

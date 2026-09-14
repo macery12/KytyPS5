@@ -109,6 +109,8 @@ public:
 
 	void SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0 = 0, uint32_t arg1 = 0,
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
+	// Remembers guest shader hashes recorded into this buffer so a device loss can name them.
+	void NoteDebugShader(uint64_t hash) noexcept;
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
 
@@ -140,6 +142,8 @@ private:
 	uint32_t            m_debug_arg2      = 0;
 	uint32_t            m_debug_arg3      = 0;
 	uint64_t            m_debug_arg4      = 0;
+	std::array<uint64_t, 8> m_debug_shaders {};
+	uint32_t                m_debug_shader_count = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
 	HW::Context*        m_registers   = nullptr;

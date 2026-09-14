@@ -17,6 +17,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <unordered_set>
 
 namespace Libs::Graphics {
 
@@ -172,6 +178,12 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 
 	width  = rt.attrib2.width + 1;
 	height = rt.attrib2.height + 1;
+	const auto max_levels = std::bit_width(std::max({width, height, volume ? depth : 1u}));
+	if (levels > max_levels) {
+		EXIT("render target has more mip levels than its extent permits: %ux%ux%u levels=%u max=%u "
+		     "addr=0x%016" PRIx64 "\n",
+		     width, height, depth, levels, max_levels, rt.base.addr);
+	}
 	const auto target_format =
 	    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type, rt.info.channel_order);
 	const auto bytes_per_element = target_format.bytes_per_element;
@@ -313,6 +325,45 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		desc.info.metadata.dcc_clear_word           = rt.clear_word0.word0;
 		desc.info.metadata.dcc_clear_register_valid = true;
 		desc.info.metadata.dcc_alpha_msb            = DccAlphaOnMsb(rt.info);
+	} else if (rt.info.cmask_fast_clear_enable && rt.cmask.addr != 0 && samples == 1) {
+		// NHL 26 fast-clears color targets by filling their CMask before the pass; the guest never
+		// writes the pixels, so the clear must be applied before guest memory is uploaded.
+		desc.info.metadata.cmask_address     = rt.cmask.addr;
+		desc.info.metadata.cmask_clear_word0 = rt.clear_word0.word0;
+		desc.info.metadata.cmask_clear_word1 = rt.clear_word1.word1;
+	}
+	{
+		// KYTY_TRACE_DCC=1: print each colour target layout once with its fast-clear metadata, so
+		// guest memory fills can be matched against the host image range.
+		static const bool trace = [] {
+			const char* value = std::getenv("KYTY_TRACE_DCC");
+			return value != nullptr && std::strcmp(value, "1") == 0;
+		}();
+		if (trace) {
+			static std::mutex                   mutex;
+			static std::unordered_set<uint64_t> seen;
+			std::scoped_lock                    lock {mutex};
+			const uint64_t key = rt.base.addr ^ (backing_size * 0x9e3779b97f4a7c15ull) ^
+			                     (static_cast<uint64_t>(target_format.format) << 48u) ^
+			                     (rt.cmask.addr * 0xff51afd7ed558ccdull);
+			if (seen.size() < 256 && seen.insert(key).second) {
+				std::printf("DccTrace: color target addr=0x%010llx size=0x%llx %ux%ux%u fmt=%d "
+				            "bpe=%u pitch=%u levels=%u layers=%u base_layer=%u tile=%s dcc=%d "
+				            "dcc_addr=0x%010llx cmask_clear=%d cmask=0x%010llx fmask=0x%010llx "
+				            "clear_word=0x%08x\n",
+				            static_cast<unsigned long long>(rt.base.addr),
+				            static_cast<unsigned long long>(backing_size), width, height, depth,
+				            static_cast<int>(target_format.format), bytes_per_element, pitch, levels,
+				            view.image_layers, view.base_layer, tile ? "tiled" : "linear",
+				            rt.info.dcc_compression_enable,
+				            static_cast<unsigned long long>(rt.dcc_addr.addr),
+				            rt.info.cmask_fast_clear_enable,
+				            static_cast<unsigned long long>(rt.cmask.addr),
+				            static_cast<unsigned long long>(rt.fmask.addr),
+				            static_cast<uint32_t>(rt.clear_word0.word0));
+				std::fflush(stdout);
+			}
+		}
 	}
 	for (uint32_t level = 0; level < levels; level++) {
 		if (volume) {

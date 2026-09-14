@@ -246,6 +246,8 @@ struct StageOutput {
 	uint32_t        index    = 0;
 	uint32_t        location = 0;
 	std::string     debug_name;
+	// Dual-source blending puts both MRT exports on one location, split by Index.
+	uint32_t blend_index = 0;
 
 	bool operator==(const StageOutput& other) const = default;
 };
@@ -409,7 +411,7 @@ struct BindingLayout {
 };
 
 struct ShaderInfo {
-	static constexpr uint32_t MaxBuffers      = 32;
+	static constexpr uint32_t MaxBuffers      = 64;
 	static constexpr uint32_t MaxImages       = 64;
 	static constexpr uint32_t MaxSamplers     = 32;
 	static constexpr uint32_t MaxSampledPairs = 64;

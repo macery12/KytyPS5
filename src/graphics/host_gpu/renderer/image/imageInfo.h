@@ -28,6 +28,11 @@ struct ImageMetadataInfo {
 	bool                stencil_compressed = false;
 	bool                dcc_clear_register_valid = false;
 	bool                dcc_alpha_msb            = true;
+	// Color-buffer CMask fast clear (single-sample, non-DCC targets). Kept outside `kind` so the
+	// image keeps metadata-free overlap and merge behavior.
+	uint64_t            cmask_address     = 0;
+	uint32_t            cmask_clear_word0 = 0;
+	uint32_t            cmask_clear_word1 = 0;
 };
 
 struct ImageSubresources {
@@ -86,8 +91,12 @@ struct ImageInfo {
 		return IsVolume() ? extent.depth : resources.layers;
 	}
 	[[nodiscard]] vk::Extent2D BlockExtent() const noexcept {
-		const auto shift = Prospero::BlockCompressedBytesPerBlock(guest_format) != 0 ? 2u : 0u;
-		return {pitch >> shift, extent.height >> shift};
+		if (Prospero::BlockCompressedBytesPerBlock(guest_format) == 0) {
+			return {pitch, extent.height};
+		}
+		// A partial 4x4 block still occupies one complete storage element.
+		return {pitch / 4u + (pitch % 4u != 0),
+		        extent.height / 4u + (extent.height % 4u != 0)};
 	}
 	[[nodiscard]] bool IsCompatible(const ImageInfo& other) const noexcept {
 		return pixel_format == other.pixel_format && samples == other.samples &&

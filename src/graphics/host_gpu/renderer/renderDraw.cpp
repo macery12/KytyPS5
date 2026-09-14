@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/window.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -35,12 +36,14 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -468,6 +471,97 @@ struct DrawCallInfo {
 	[[nodiscard]] const char* Name() const { return IsIndexed() ? "DrawIndex" : "DrawIndexAuto"; }
 };
 
+// A late-frame sample keeps this useful for menu investigation without logging every draw.
+static uint64_t UiTraceStartFrame() {
+	static const uint64_t start = [] {
+		const char* value = std::getenv("KYTY_TRACE_UI");
+		if (value == nullptr || *value == '\0') return UINT64_MAX;
+		char* end = nullptr;
+		const uint64_t frame = std::strtoull(value, &end, 10);
+		if (end == value || *end != '\0' || frame == 0) return UINT64_MAX;
+		std::printf("UI trace: armed at presented frame=%llu\n",
+		            static_cast<unsigned long long>(frame));
+		std::fflush(stdout);
+		return frame;
+	}();
+	return start;
+}
+
+static void TraceUiDrop(const CommandBuffer& buffer, const DrawCallInfo& draw,
+                        const char* reason) {
+	if (UiTraceStartFrame() == UINT64_MAX) return;
+	const auto frame = WindowGetPresentedFrameNum();
+	if (frame < UiTraceStartFrame()) return;
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) >= 32) return;
+	const auto& shaders = buffer.GetShaders();
+	std::printf("UI trace: frame=%llu dropped=%s prim=%u count=%u vs=0x%016" PRIx64
+	            " ps=0x%016" PRIx64 "\n",
+	            static_cast<unsigned long long>(frame), reason,
+	            static_cast<uint32_t>(buffer.GetUserConfig().GetPrimType()), draw.index_count,
+	            shaders.GetVs().es_regs.data_addr, shaders.GetPs().ps_regs.data_addr);
+	std::fflush(stdout);
+}
+
+static void TraceUiDraw(const CommandBuffer& buffer, const DrawCallInfo& draw,
+                        const DrawRenderState& state, const char* outcome) {
+	if (UiTraceStartFrame() == UINT64_MAX) return;
+	const auto frame = WindowGetPresentedFrameNum();
+	if (frame < UiTraceStartFrame()) return;
+	if (outcome[0] == 'e') {
+		static std::atomic<bool> reached {false};
+		if (!reached.exchange(true, std::memory_order_relaxed)) {
+			std::printf("UI trace: reached frame=%llu; sampling overlay-like draws\n",
+			            static_cast<unsigned long long>(frame));
+			std::fflush(stdout);
+		}
+	}
+	if (state.color_count == 0 || !state.ps_active) return;
+	const auto& ctx = buffer.GetRegisters();
+	const auto& color = state.color_info[0];
+	const auto& blend = ctx.GetBlendControl(color.target_slot);
+	const auto& target = ctx.GetRenderTarget(color.target_slot);
+	const auto& depth = ctx.GetDepthControl();
+	const auto prim = buffer.GetUserConfig().GetPrimType();
+	const bool rect = prim == Prospero::PrimitiveType::kRectList ||
+	                  prim == Prospero::PrimitiveType::kRectListLegacy ||
+	                  prim == Prospero::PrimitiveType::kQuadListLegacy;
+	if (!rect && (depth.z_enable || (!blend.enable && draw.index_count > 6))) return;
+	const uint64_t ps_hash = state.ps_input_info.stage.program->shader_hash;
+	const uint64_t sample_key = ps_hash ^ std::rotl(color.desc.info.data.address, 17);
+	static std::mutex seen_mutex;
+	static std::unordered_map<uint64_t, uint32_t> seen;
+	static uint32_t total = 0;
+	{
+		std::lock_guard lock(seen_mutex);
+		if (total >= 160 || seen[sample_key]++ >= 2) return;
+		++total;
+	}
+	const auto extent = color.Extent();
+	const auto& viewport = ctx.GetScreenViewport();
+	const auto& vp0 = viewport.viewports[0];
+	const auto scissor = calc_final_scissor(viewport, ctx.GetScanModeControl(), extent, 0);
+	const auto& ps = state.ps_input_info;
+	std::printf("UI trace: frame=%llu %s %s prim=%u count=%u rt=0x%010" PRIx64
+	            " extent=%ux%u format=%u mask=0x%08" PRIx32
+	            " blend=%u bypass=%u src=%u dst=%u depth=%u ps=0x%016" PRIx64
+	            " textures=%zu out=%u viewport=%.1f,%.1f %.1fx%.1f"
+	            " scissor=%d,%d-%d,%d\n",
+	            static_cast<unsigned long long>(frame), outcome, draw.Name(),
+	            static_cast<uint32_t>(prim), draw.index_count, color.desc.info.data.address,
+	            extent.width, extent.height, static_cast<uint32_t>(color.desc.info.pixel_format),
+	            ctx.GetRenderTargetMask(), blend.enable ? 1u : 0u,
+	            target.info.blend_bypass ? 1u : 0u,
+	            static_cast<uint32_t>(blend.color_srcblend),
+	            static_cast<uint32_t>(blend.color_destblend),
+	            depth.z_enable ? 1u : 0u, ps_hash, ps.stage.program->info.images.size(),
+	            static_cast<uint32_t>(ps.target_output_mode[color.target_slot]),
+	            vp0.xoffset - vp0.xscale,
+	            vp0.yoffset - vp0.yscale, vp0.xscale * 2.0f, vp0.yscale * 2.0f,
+	            scissor.left, scissor.top, scissor.right, scissor.bottom);
+	std::fflush(stdout);
+}
+
 RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
                                                  uint32_t color_count, RenderDepthInfo& depth,
                                                  const std::optional<PreparedBindings>& pixel) {
@@ -484,7 +578,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		EXIT_IF(!target.image_id);
 		const auto old_image = cache.m_slot_images.try_get(target.image_id);
 		if (old_image == nullptr || (!old_image->registered && !old_image->info.data.Empty()) ||
-		    old_image->binding.needs_rebind) {
+		    old_image->depth_id || old_image->binding.needs_rebind) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
@@ -493,6 +587,28 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		}
 		const auto image_view = cache.FindRenderTarget(target.image_id, target.desc);
 		auto&      image      = cache.GetImage(target.image_id);
+		if (target.desc.info.extent.width == 1920 &&
+		    target.desc.info.extent.height == 1080 &&
+		    target.desc.info.pixel_format == vk::Format::eR8G8B8A8Unorm &&
+		    UiTraceStartFrame() != UINT64_MAX &&
+		    WindowGetPresentedFrameNum() >= UiTraceStartFrame()) {
+			static std::atomic<uint32_t> ui_target_logged {0};
+			if (ui_target_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+				std::printf("UI trace: target guest=0x%010" PRIx64
+				            " %ux%u format=%u view=%u"
+				            " cache_id=%u:%u cached=0x%010" PRIx64
+				            " %ux%u format=%u backing=%ux%u format=%u\n",
+				            target.desc.info.data.address, target.desc.info.extent.width,
+				            target.desc.info.extent.height,
+				            static_cast<uint32_t>(target.desc.info.pixel_format),
+				            static_cast<uint32_t>(target.desc.view_info.format),
+				            target.image_id.index, target.image_id.generation,
+				            image.info.data.address, image.info.extent.width, image.info.extent.height,
+				            static_cast<uint32_t>(image.info.pixel_format), image.backing.extent.width,
+				            image.backing.extent.height, static_cast<uint32_t>(image.backing.format));
+				std::fflush(stdout);
+			}
+		}
 		SetVulkanObjectNameF(m_context.GetGraphics().device, image.backing.image,
 		                     "Kyty.MRT{}.Image[guest=0x{:016x} size=0x{:x} format={}]",
 		                     target.target_slot, image.info.data.address, image.info.data.size,
@@ -923,12 +1039,41 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 
 	state.ps_active       = DrawHasActivePixelShader(buffer);
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
+		TraceUiDrop(buffer, draw, "no-target-or-pixel-shader");
 		LogFramebufferSkip(draw.Name(), state.color_info[0], state.depth_info, buffer,
 		                   draw.index_count, 0);
 		return false;
 	}
 
 	return true;
+}
+
+static bool IsDualSourceBlendFactor(uint8_t factor) {
+	switch (static_cast<Prospero::BlendFactor>(factor)) {
+		case Prospero::BlendFactor::kSrc1Color:
+		case Prospero::BlendFactor::kOneMinusSrc1Color:
+		case Prospero::BlendFactor::kSrc1Alpha:
+		case Prospero::BlendFactor::kOneMinusSrc1Alpha: return true;
+		default: return false;
+	}
+}
+
+// The guest asks for dual-source blending through the blend factors of a render target; the
+// pixel shader then has to export its two sources as location 0, index 0 and index 1.
+static bool DrawUsesDualSourceBlend(const HW::Context& ctx, const DrawRenderState& state) {
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		const auto& blend = ctx.GetBlendControl(state.color_info[i].target_slot);
+		if (!blend.enable) {
+			continue;
+		}
+		if (IsDualSourceBlendFactor(blend.color_srcblend) ||
+		    IsDualSourceBlendFactor(blend.color_destblend) ||
+		    (blend.separate_alpha_blend && (IsDualSourceBlendFactor(blend.alpha_srcblend) ||
+		                                    IsDualSourceBlendFactor(blend.alpha_destblend)))) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -953,7 +1098,8 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	}
 	state.programs = pipeline_cache.GetGraphicsPrograms(
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vs_input_info, state.ps_input_info);
+	    target_export_mapping, state.ps_active, DrawUsesDualSourceBlend(ctx, state),
+	    state.vs_input_info, state.ps_input_info);
 }
 
 static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffer,
@@ -1171,14 +1317,37 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	buffer.NoteDebugShader(state.vs_input_info.stage.program->shader_hash);
+	if (state.ps_active) {
+		buffer.NoteDebugShader(state.ps_input_info.stage.program->shader_hash);
+	}
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
-	if (mesh_active) {
-		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
-	} else {
-		EmitDrawPrimitives(ucfg, vk_buffer, state.vs_input_info, draw, emit);
+	{
+		// Name the draw for GPU crash tools (RGD), which otherwise only report driver-level
+		// Draw(VertexCount, InstanceCount) markers. Skip formatting when labels are unavailable.
+		std::string label;
+		if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginDebugUtilsLabelEXT != nullptr) {
+			const uint64_t vs_hash = state.vs_input_info.stage.program->shader_hash;
+			const uint64_t ps_hash =
+			    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
+			const uint64_t rt_addr =
+			    state.color_count != 0 ? state.color_info[0].desc.info.data.address : 0;
+			label = fmt::format(
+			    "Guest {} vs=0x{:016x} ps=0x{:016x} prim={} count={} instances={} "
+			    "first_instance={} rt=0x{:010x} submit={}",
+			    draw.Name(), vs_hash, ps_hash, static_cast<uint32_t>(ucfg.GetPrimType()),
+			    draw.index_count, draw.instance_count, emit.first_instance, rt_addr, submit_id);
+		}
+		VulkanDebugLabelScope scope(vk_buffer, label.empty() ? nullptr : label.c_str());
+		if (mesh_active) {
+			vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		} else {
+			EmitDrawPrimitives(ucfg, vk_buffer, state.vs_input_info, draw, emit);
+		}
 	}
+	TraceUiDraw(buffer, draw, state, "emitted");
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
@@ -1206,6 +1375,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
+	(void)UiTraceStartFrame();
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
@@ -1226,6 +1396,8 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		TraceUiDrop(buffer, {CommandBufferDebugOp::DrawIndex, args.index_count,
+		                     args.instance_count, args.first_instance}, "invalid-vertex-shader");
 		return;
 	}
 
@@ -1318,6 +1490,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
+	(void)UiTraceStartFrame();
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
@@ -1338,6 +1511,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		TraceUiDrop(buffer, {CommandBufferDebugOp::DrawIndexAuto, args.vertex_count,
+		                     args.instance_count, args.first_instance}, "invalid-vertex-shader");
 		return;
 	}
 
@@ -1378,6 +1553,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	if (rect_list && state.vs_input_info.buffers_num == 0 &&
 	    state.vs_input_info.stage.program->param_export_mask == 0 &&
 	    state.ps_input_info.input_num != 0) {
+		TraceUiDraw(buffer, draw, state, "skipped-rect-no-parameters");
 		if (graphics_debug_dump_enabled()) {
 			LOGF("DrawIndexAuto: skipping rect-list draw with no VS param exports and PS inputs: "
 			     "ps_inputs=%u ps=0x%016" PRIx64 " es=0x%016" PRIx64 " gs=0x%016" PRIx64 "\n",

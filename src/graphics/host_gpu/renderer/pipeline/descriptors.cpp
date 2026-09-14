@@ -221,6 +221,7 @@ static void ValidateSampledDepthBinding(const ShaderRecompiler::IR::ImageResourc
 	EXIT("unsupported sampled depth image: resource=%d encoding=%d view=%d "
 	     "class=%u numeric=%u dimension=%u mip_mode=%u read=%d written=%d atomic=%d compare=%d "
 	     "guest_format=%u swizzle=0x%03x image_format=%d view_format=%d image_layers=%u "
+	     "active_target=%d "
 	     "descriptor_type=%u base_array=%u depth=%u descriptor_pitch=%u target_pitch=%u "
 	     "addr=0x%016" PRIx64 " size=0x%016" PRIx64
 	     " dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
@@ -231,6 +232,7 @@ static void ValidateSampledDepthBinding(const ShaderRecompiler::IR::ImageResourc
 	     resource.depth_compare, static_cast<uint32_t>(descriptor.Format()),
 	     descriptor.DstSelXYZW(), static_cast<int>(image.info.pixel_format),
 	     static_cast<int>(view_format), image.info.resources.layers,
+	     image.binding.is_target ? 1 : 0,
 	     static_cast<uint32_t>(descriptor.Type()), descriptor.BaseArray5(), descriptor.Depth(),
 	     descriptor_pitch, image.info.pitch, descriptor.Base40(), size, descriptor.fields[0],
 	     descriptor.fields[1], descriptor.fields[2], descriptor.fields[3], descriptor.fields[4],
@@ -392,7 +394,9 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 			break;
 		default: EXIT("null image has unsupported numeric class\n");
 	}
-	desc.info.pixel_format    = VulkanFormat(desc.info.guest_format);
+	// Comparison samplers require a depth image even when the guest descriptor is null.
+	desc.info.pixel_format = resource.depth_compare ? vk::Format::eD32Sfloat
+	                                                : VulkanFormat(desc.info.guest_format);
 	desc.info.type            = Prospero::ImageType::kColor2D;
 	desc.info.extent          = {1, 1, 1};
 	desc.info.resources       = {1, 1};
@@ -401,7 +405,8 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
 	desc.view_info.format     = desc.info.pixel_format;
 	desc.view_info.type       = vk::ImageViewType::e2D;
-	desc.view_info.aspect     = vk::ImageAspectFlagBits::eColor;
+	desc.view_info.aspect     = resource.depth_compare ? vk::ImageAspectFlagBits::eDepth
+	                                                   : vk::ImageAspectFlagBits::eColor;
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
 	                                ? vk::ImageUsageFlagBits::eStorage
 	                                : vk::ImageUsageFlagBits::eSampled;
@@ -537,11 +542,28 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto type         = TextureType(descriptor);
 	const bool multisampled = IsMultisampledTexture(type);
 	const auto max_mip      = resource.r128 ? last_level : descriptor.MaxMip();
-	const auto levels       = multisampled ? 1u : static_cast<uint32_t>(max_mip) + 1u;
+	const auto guest_levels = multisampled ? 1u : static_cast<uint32_t>(max_mip) + 1u;
+	const auto depth        = static_cast<uint32_t>(descriptor.Depth()) + 1u;
+	const auto max_dimension =
+	    std::max({width, height, type == Prospero::ImageType::kColor3D ? depth : 1u});
+	const auto max_levels   = static_cast<uint32_t>(std::bit_width(max_dimension));
+	const auto levels       = std::min(guest_levels, max_levels);
 	const bool dynamic_storage =
 	    storage && resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::DynamicStorage;
-	const auto view_last_level =
+	const uint32_t requested_view_last_level =
 	    !multisampled && !dynamic_storage ? std::min(last_level, max_mip) : last_level;
+	const auto view_last_level = std::min(requested_view_last_level, levels - 1u);
+	if (guest_levels > levels) {
+		static std::atomic_uint log_count = 0;
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("Texture: clamped mip levels from %u to %u for %ux%ux%u "
+			     "base=%u last=%u max=%u format=%u tile=%u at 0x%016" PRIx64 "\n",
+			     guest_levels, levels, width, height,
+			     type == Prospero::ImageType::kColor3D ? depth : 1u, base_level, last_level,
+			     max_mip, static_cast<uint32_t>(descriptor.Format()),
+			     static_cast<uint32_t>(descriptor.TileMode()), address);
+		}
+	}
 	const auto tile       = descriptor.TileMode();
 	const bool depth_tile = tile == Prospero::TileMode::kDepth;
 	const bool msaa_tile  = depth_tile || tile == Prospero::TileMode::kRenderTarget;
@@ -566,7 +588,6 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto samples = multisampled ? 1u << last_level : 1u;
 	const auto view_levels =
 	    multisampled ? 1u : static_cast<uint32_t>(view_last_level - base_level) + 1u;
-	const auto depth          = static_cast<uint32_t>(descriptor.Depth()) + 1u;
 	const auto format         = descriptor.Format();
 	const auto surface_format = TextureGetSurfaceFormatInfo(format);
 	const bool shader_conversion =
@@ -654,6 +675,11 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	auto*      image               = &texture_cache.GetImage(id);
 	const bool stencil_association = static_cast<bool>(image->depth_id);
 	if (stencil_association) {
+		if (storage || !ImageViewOps::IsStencilViewFormat(pixel_format)) {
+			EXIT("stencil association cannot serve this texture: storage=%d guest_format=%u "
+			     "view_format=%d addr=0x%016" PRIx64 "\n",
+			     storage, static_cast<uint32_t>(format), static_cast<int>(pixel_format), address);
+		}
 		id    = image->depth_id;
 		image = &texture_cache.GetImage(id);
 	} else if (image->info.IsDepth()) {
@@ -830,6 +856,15 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	}
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		auto& binding = images[i];
+		const auto* current = texture_cache.m_slot_images.try_get(binding.image_id);
+		const bool  storage = binding.desc.type == TextureCache::BindingType::Storage;
+		if (current == nullptr ||
+		    (!current->info.data.Empty() && (!current->registered || current->binding.needs_rebind)) ||
+		    !ImageViewOps::FormatsCompatible(current->backing.format, binding.desc.view_info.format) ||
+		    (storage && !(current->backing.usage & vk::ImageUsageFlagBits::eStorage))) {
+			binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
+			BindImage(binding.image_id, storage);
+		}
 		binding.mip_views.clear();
 		const auto& resource = program.info.images[i];
 		if (resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::DynamicStorage) {
@@ -851,7 +886,6 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			binding.image_view = texture_cache.FindTexture(binding.image_id, desc);
 		}
 		auto&      image   = texture_cache.GetImage(binding.image_id);
-		const bool storage = binding.desc.type == TextureCache::BindingType::Storage;
 		image.usage.storage |= storage;
 		image.usage.texture |= !storage;
 	}

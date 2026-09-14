@@ -11,6 +11,7 @@
 
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 
 using namespace Common;
@@ -153,6 +154,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (arg == "--rd") {
 			options.config.renderdoc_enabled = true;
+			// RenderDoc's implicit Vulkan layer only loads when this is set before the
+			// Vulkan instance is created; without it captures report "API: None".
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+			_putenv_s("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1");
+#else
+			setenv("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1", 1);
+#endif
 			continue;
 		}
 
