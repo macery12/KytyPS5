@@ -614,11 +614,34 @@ static void ShaderGetStaticInputInfoPS(
 		ps_info.interpolator_settings[i] = sh.ps_interpolator_settings[i];
 	}
 
+	// SPI_SHADER_COL_FORMAT is indexed by export, and exports are packed onto the slots whose
+	// CB_SHADER_MASK nibble is non-zero. NHL 26's G-buffer binds 7 targets with slot 5 masked
+	// off, so export 5 (UINT16) belongs in slot 6. Only remap when the mask names enough
+	// slots for every formatted export; otherwise keep export index == slot.
+	uint32_t export_count = 0;
+	for (uint32_t i = 0; i < 8; i++) {
+		if (sh.target_output_mode[i] != 0) {
+			export_count = i + 1;
+		}
+	}
+	uint8_t  written_slots[8] = {};
+	uint32_t written_count    = 0;
+	for (uint32_t slot = 0; slot < 8; slot++) {
+		if (((sh.m_cbShaderMask >> (slot * 4u)) & 0x0fu) != 0) {
+			written_slots[written_count++] = static_cast<uint8_t>(slot);
+		}
+	}
+	const bool remap_exports = export_count != 0 && written_count >= export_count;
+
 	for (int i = 0; i < 8; i++) {
-		ps_info.target_output_mode[i]    = sh.target_output_mode[i];
-		ps_info.target_export_mapping[i] = sh.target_output_mode[i] != 0
-		                                       ? target_export_mapping[i]
-		                                       : Prospero::ColorComponentMapping {};
+		const uint8_t location =
+		    remap_exports && static_cast<uint32_t>(i) < written_count ? written_slots[i]
+		                                                               : static_cast<uint8_t>(i);
+		ps_info.target_output_mode[i]     = sh.target_output_mode[i];
+		ps_info.target_export_location[i] = location;
+		ps_info.target_export_mapping[i]  = sh.target_output_mode[i] != 0
+		                                        ? target_export_mapping[location]
+		                                        : Prospero::ColorComponentMapping {};
 	}
 }
 
@@ -716,6 +739,8 @@ void BuildStageStaticKey(const ShaderPixelInputInfo& info, std::vector<uint32_t>
 	key.push_back(static_cast<uint32_t>(info.ps_early_z));
 	key.push_back(static_cast<uint32_t>(info.ps_dual_source_blend));
 	key.insert(key.end(), std::begin(info.target_output_mode), std::end(info.target_output_mode));
+	key.insert(key.end(), std::begin(info.target_export_location),
+	           std::end(info.target_export_location));
 	for (uint32_t base = 0; base < info.target_export_mapping.size(); base += 4u) {
 		uint32_t packed = 0;
 		for (uint32_t i = 0; i < 4u; i++) {

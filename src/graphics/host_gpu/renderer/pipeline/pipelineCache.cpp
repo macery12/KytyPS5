@@ -800,8 +800,16 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	uint32_t attachment_samples = 0;
 	for (uint32_t i = 0; i < color_count; i++) {
 		EXIT_IF(!colors[i].image_id || colors[i].desc.view_info.format == vk::Format::eUndefined);
-		static_params.color_mask[i] = colors[i].export_mapping.ApplyMask(
-		    render_target_mask_slot(ctx.GetRenderTargetMask(), colors[i].target_slot));
+		auto target_mask = render_target_mask_slot(ctx.GetRenderTargetMask(), colors[i].target_slot);
+		// A slot left out of CB_SHADER_MASK receives no pixel-shader export (exports are packed onto
+		// the enabled slots), so the hardware leaves it untouched. Vulkan leaves an attachment with
+		// no output undefined; mask it off instead.
+		const auto shader_mask = ctx.GetShaderRegisters().m_cbShaderMask;
+		if (ps_active && shader_mask != 0 &&
+		    render_target_mask_slot(shader_mask, colors[i].target_slot) == 0) {
+			target_mask = 0;
+		}
+		static_params.color_mask[i] = colors[i].export_mapping.ApplyMask(target_mask);
 		rendering.color_formats[i] = colors[i].desc.view_info.format;
 		if (attachment_samples == 0) {
 			attachment_samples = colors[i].desc.info.samples;

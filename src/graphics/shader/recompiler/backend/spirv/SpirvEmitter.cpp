@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <cstring>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
@@ -254,6 +256,17 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					requirements.subgroup_shuffle = true;
 					if (inst.GetOpcode() == IR::ValueOpcode::DppMoveU32) {
 						requirements.subgroup_local_invocation_id = true;
+						// Pixel quad-permutation moves read another pixel of the 2x2 quad; they
+						// are emulated with fine derivatives (KYTY_PIXEL_QUAD_DERIVATIVES=0 keeps
+						// the old subgroup shuffle).
+						static const bool quad_derivatives = [] {
+							const char* value = std::getenv("KYTY_PIXEL_QUAD_DERIVATIVES");
+							return value == nullptr || std::strcmp(value, "0") != 0;
+						}();
+						if (quad_derivatives && program.stage == ShaderType::Pixel &&
+						    inst.Flags<IR::DppMoveFlags>().control <= 0xffu) {
+							requirements.pixel_quad_derivatives = true;
+						}
 					}
 					break;
 				}

@@ -1100,6 +1100,84 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
 	    target_export_mapping, state.ps_active, DrawUsesDualSourceBlend(ctx, state),
 	    state.vs_input_info, state.ps_input_info);
+
+	// Diagnostic (bounded, always on): pixel-shader exports are emitted at location = guest
+	// slot, while color attachments are compacted in slot order. Report draws where the export
+	// class from SPI_SHADER_COL_FORMAT (integer modes 7/8) disagrees with the attachment at that
+	// location, or where an attachment does not hold its own guest slot. NHL 26's G-buffer writes
+	// a UINT16 export 5 into an R8G8B8A8_UNORM attachment, leaving the lighting flag target empty.
+	if (state.ps_active && state.ps_input_info.stage.program != nullptr) {
+		const auto integer_format = [](vk::Format format) {
+			switch (format) {
+				case vk::Format::eR8Uint:
+				case vk::Format::eR8Sint:
+				case vk::Format::eR16Uint:
+				case vk::Format::eR16Sint:
+				case vk::Format::eR32Uint:
+				case vk::Format::eR32Sint:
+				case vk::Format::eR8G8Uint:
+				case vk::Format::eR8G8Sint:
+				case vk::Format::eR16G16Uint:
+				case vk::Format::eR16G16Sint:
+				case vk::Format::eR32G32Uint:
+				case vk::Format::eR32G32Sint:
+				case vk::Format::eR8G8B8A8Uint:
+				case vk::Format::eR8G8B8A8Sint:
+				case vk::Format::eR16G16B16A16Uint:
+				case vk::Format::eR16G16B16A16Sint:
+				case vk::Format::eR32G32B32A32Uint:
+				case vk::Format::eR32G32B32A32Sint:
+				case vk::Format::eA2B10G10R10UintPack32: return true;
+				default: return false;
+			}
+		};
+		const auto& modes    = state.ps_input_info.target_output_mode;
+		bool        mismatch = false;
+		uint64_t    key      = state.ps_input_info.stage.program->shader_hash;
+		for (uint32_t i = 0; i < state.color_count; i++) {
+			const auto& color   = state.color_info[i];
+			const auto  mode    = modes[i];
+			const bool  int_out = mode == 7u || mode == 8u;
+			if (color.target_slot != i ||
+			    (mode != 0u && int_out != integer_format(color.desc.view_info.format))) {
+				mismatch = true;
+			}
+			key = (key ^ ((static_cast<uint64_t>(color.target_slot) << 40u) |
+			              (static_cast<uint64_t>(color.desc.view_info.format) << 8u) | mode)) *
+			      0x100000001b3ull;
+		}
+		static std::mutex                             mrt_mutex;
+		static std::unordered_map<uint64_t, uint32_t> mrt_seen;
+		std::lock_guard                               lock(mrt_mutex);
+		if (mismatch && mrt_seen.size() < 24 && mrt_seen.emplace(key, 0u).second) {
+			auto& cache = buffer.GetContext().GetTextureCache();
+			const auto& locs = state.ps_input_info.target_export_location;
+			std::printf("MrtTrace: ps=0x%016llx attachments=%u target_mask=0x%08x shader_mask=0x%08x"
+			            " modes=%u,%u,%u,%u,%u,%u,%u,%u export_locations=%u,%u,%u,%u,%u,%u,%u,%u\n",
+			            static_cast<unsigned long long>(state.ps_input_info.stage.program->shader_hash),
+			            state.color_count, ctx.GetRenderTargetMask(),
+			            ctx.GetShaderRegisters().m_cbShaderMask, modes[0], modes[1], modes[2],
+			            modes[3], modes[4], modes[5], modes[6], modes[7], locs[0], locs[1], locs[2],
+			            locs[3], locs[4], locs[5], locs[6], locs[7]);
+			for (uint32_t i = 0; i < state.color_count; i++) {
+				const auto& color = state.color_info[i];
+				const auto& rt    = ctx.GetRenderTarget(color.target_slot);
+				const auto& image = cache.GetImage(color.image_id);
+				std::printf("MrtTrace:   attachment=%u slot=%u guest=0x%010llx guest_fmt=%u/%u/%u"
+				            " desc=%s view=%s backing=%s image=%u mode_at_location=%u"
+				            " mode_of_slot=%u\n",
+				            i, color.target_slot, static_cast<unsigned long long>(rt.base.addr),
+				            static_cast<uint32_t>(rt.info.format),
+				            static_cast<uint32_t>(rt.info.channel_type),
+				            static_cast<uint32_t>(rt.info.channel_order),
+				            vk::to_string(color.desc.info.pixel_format).c_str(),
+				            vk::to_string(color.desc.view_info.format).c_str(),
+				            vk::to_string(image.backing.format).c_str(), color.image_id.index, modes[i],
+				            modes[color.target_slot]);
+			}
+			std::fflush(stdout);
+		}
+	}
 }
 
 static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffer,

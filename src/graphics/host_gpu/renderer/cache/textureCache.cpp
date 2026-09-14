@@ -1447,10 +1447,21 @@ void TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		EXIT("TextureCache: stencil association requires a depth/stencil image\n");
 	}
 
+	// Only reuse an existing association or a stencil-format texture. Tagging an unrelated color
+	// image hides it from color lookups (FindImage skips associations), so the next color bind
+	// creates a fresh copy that gets tagged again: NHL 26 leaked one RGBA8 2048x1024 image per
+	// frame this way until PageManager's 127 write watchers per page overflowed.
 	ImageId association {};
 	for (const auto id: FindImagesInRegion(stencil.address, stencil.size, false)) {
 		const auto owner = m_slot_images.try_get(id);
-		if (owner != nullptr && owner->info.data.address == stencil.address) {
+		if (owner == nullptr || !owner->registered || owner->info.data.address != stencil.address) {
+			continue;
+		}
+		if (owner->depth_id) {
+			association = id;
+			break;
+		}
+		if (!owner->info.IsDepth() && ImageViewOps::IsStencilViewFormat(owner->info.pixel_format)) {
 			association = id;
 		}
 	}

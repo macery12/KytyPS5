@@ -44,9 +44,12 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 			return true;
 		case O::V_CMPX_NE_U32:
 			// Workaround (default on, KYTY_FORCE_UI_MASK=0 disables): bypass only the final
-			// compositor's per-pixel UI mask. The UI image fetch at 0x7ec is otherwise skipped when
-			// this mask is zero, and the mask producer is not emulated correctly yet.
-			if (program.shader_hash == 0xd8ad62a44c60a9a3ull && inst.pc == 0x7b8u) {
+			// compositor's per-pixel UI mask. The UI image fetch (menu CS 0x7ec, in-match CS 0x3f0)
+			// is otherwise skipped when this mask is zero, and the mask producer is not emulated
+			// correctly yet. The in-match compositor 6d3c5fef is the same shader family; without it
+			// the HUD and pause menu are drawn but never composited.
+			if ((program.shader_hash == 0xd8ad62a44c60a9a3ull && inst.pc == 0x7b8u) ||
+			    (program.shader_hash == 0x6d3c5fef17d1d7e1ull && inst.pc == 0x3bcu)) {
 				static const bool force_ui_mask = [] {
 					const char* value = std::getenv("KYTY_FORCE_UI_MASK");
 					return value == nullptr || std::strcmp(value, "0") != 0;

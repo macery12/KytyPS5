@@ -135,6 +135,10 @@ struct ShaderPixelInputInfo {
 	uint32_t                                       custom_interpolation_mask    = 0;
 	uint32_t                                       ps_perspective_center_vgpr   = UINT32_MAX;
 	uint8_t                                        target_output_mode[8]        = {};
+	// Guest MRT slot (SPIR-V output location) fed by each MRT export index. The hardware
+	// packs exports onto the slots enabled in CB_SHADER_MASK, in slot order.
+	uint8_t                                        target_export_location[8]    = {0, 1, 2, 3,
+	                                                                               4, 5, 6, 7};
 	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping        = {};
 	uint32_t                                       scratch_size_dwords          = 0;
 	bool                                           ps_pos_x                     = false;

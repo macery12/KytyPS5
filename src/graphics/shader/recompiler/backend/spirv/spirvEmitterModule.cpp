@@ -383,6 +383,12 @@ void DefineInputs(EmitterState& state) {
 			add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		}
 	}
+	if (state.program.stage == ShaderType::Pixel && state.requirements.pixel_quad_derivatives &&
+	    std::ranges::none_of(state.inputs, [](const InputBinding& input) {
+		    return input.kind == IR::StageInputKind::FragCoord;
+	    })) {
+		state.inputs.push_back({{IR::StageInputKind::FragCoord, 0, 4, "gl_FragCoord"}});
+	}
 	for (auto& input: state.inputs) {
 		uint32_t type = TypeU32(state);
 		switch (input.kind) {
@@ -610,6 +616,9 @@ void DefineModule(EmitterState& state) {
 	}
 	if (state.requirements.subgroup_shuffle) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
+	}
+	if (state.requirements.pixel_quad_derivatives && state.program.stage == ShaderType::Pixel) {
+		state.builder.RequireCapability(spv::CapabilityDerivativeControl);
 	}
 	if (state.requirements.compute_derivatives && state.program.stage == ShaderType::Compute) {
 		state.builder.RequireCapability(spv::CapabilityComputeDerivativeGroupQuadsKHR);

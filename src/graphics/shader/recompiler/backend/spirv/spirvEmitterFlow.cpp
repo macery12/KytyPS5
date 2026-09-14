@@ -581,9 +581,84 @@ static uint32_t KeepOwnValueForMissingPixelLane(ValueEmitContext& ctx, const IR:
 	return EmitNative<spv::OpSelect, IR::Type::U32>(state, missing, ctx.Arg(inst, index), fetched);
 }
 
+// A PS5 pixel wave is built from 2x2 quads, and quad-permutation moves (control <= 0xff) read
+// another pixel of the quad; guest shaders compute derivatives as neighbour minus own. A Vulkan
+// fragment subgroup is not the pixel quad (AMD returns the own value), which zeroed those
+// derivatives inside triangles and left NHL 26's ice black except along triangle edges. Emulate
+// the neighbour with fine derivatives: v + (tx - x) * dFdxFine(v) + (ty - y) * dFdyFine(v), where
+// lane = x + 2 * y inside the quad.
+static uint32_t EmitPixelQuadNeighbourU32(ValueEmitContext& ctx, const IR::Inst& inst,
+                                          uint32_t control) {
+	auto&      state = ctx.state;
+	const auto frag  = InputVariableForKind(state, IR::StageInputKind::FragCoord);
+	if (frag == 0) {
+		ctx.Fail(inst, "pixel quad move requires gl_FragCoord");
+	}
+	const auto quad_axis = [&](uint32_t axis) {
+		const auto pointer = state.builder.AllocateId();
+		const auto value   = state.builder.AllocateId();
+		const auto floored = state.builder.AllocateId();
+		const auto integer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain,
+		                          TypePointer(state, spv::StorageClassInput, TypeF32(state)),
+		                          pointer, frag, ConstantU32(state, axis));
+		state.builder.AddFunction(spv::OpLoad, TypeF32(state), value, pointer);
+		state.builder.AddFunction(spv::OpExtInst, TypeF32(state), floored, GlslStd450(state),
+		                          GLSLstd450Floor, value);
+		state.builder.AddFunction(spv::OpConvertFToU, TypeU32(state), integer, floored);
+		return EmitBinaryU32(state, spv::OpBitwiseAnd, integer, ConstantU32(state, 1));
+	};
+	const auto to_float = [&](uint32_t value) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpConvertUToF, TypeF32(state), result, value);
+		return result;
+	};
+	const auto float_op = [&](spv::Op opcode, uint32_t lhs, uint32_t rhs) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(opcode, TypeF32(state), result, lhs, rhs);
+		return result;
+	};
+	const auto x      = quad_axis(0);
+	const auto y      = quad_axis(1);
+	const auto own    = EmitBinaryU32(state, spv::OpBitwiseOr, x,
+	                                  EmitBinaryU32(state, spv::OpShiftLeftLogical, y,
+	                                                ConstantU32(state, 1)));
+	const auto shift  = EmitBinaryU32(state, spv::OpShiftLeftLogical, own, ConstantU32(state, 1));
+	const auto target = EmitBinaryU32(
+	    state, spv::OpBitwiseAnd,
+	    EmitBinaryU32(state, spv::OpShiftRightLogical, ConstantU32(state, control), shift),
+	    ConstantU32(state, 3));
+	const auto tx = EmitBinaryU32(state, spv::OpBitwiseAnd, target, ConstantU32(state, 1));
+	const auto ty = EmitBinaryU32(state, spv::OpShiftRightLogical, target, ConstantU32(state, 1));
+	const auto dx = float_op(spv::OpFSub, to_float(tx), to_float(x));
+	const auto dy = float_op(spv::OpFSub, to_float(ty), to_float(y));
+
+	const auto bits  = ctx.Arg(inst, 0);
+	const auto value = state.builder.AllocateId();
+	const auto ddx   = state.builder.AllocateId();
+	const auto ddy   = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBitcast, TypeF32(state), value, bits);
+	state.builder.AddFunction(spv::OpDPdxFine, TypeF32(state), ddx, value);
+	state.builder.AddFunction(spv::OpDPdyFine, TypeF32(state), ddy, value);
+	const auto moved = float_op(spv::OpFAdd,
+	                            float_op(spv::OpFAdd, value, float_op(spv::OpFMul, dx, ddx)),
+	                            float_op(spv::OpFMul, dy, ddy));
+	const auto moved_bits = state.builder.AllocateId();
+	const auto same       = state.builder.AllocateId();
+	const auto result     = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBitcast, TypeU32(state), moved_bits, moved);
+	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), same, target, own);
+	state.builder.AddFunction(spv::OpSelect, TypeU32(state), result, same, bits, moved_bits);
+	return result;
+}
+
 uint32_t EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto flags    = inst.Flags<IR::DppMoveFlags>();
+	if (state.program.stage == ShaderType::Pixel && state.lane_count == 1 &&
+	    flags.control <= 0xffu && state.requirements.pixel_quad_derivatives) {
+		return EmitPixelQuadNeighbourU32(ctx, inst, flags.control);
+	}
 	const auto target   = EmitDppTargetLane(state, flags.control);
 	const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
 	if (flags.fetch_inactive) {

@@ -357,8 +357,13 @@ void CollectOutputs(const Program& program, ShaderStageInputInfo input_info, Sha
 					                         input_info.pixel != nullptr &&
 					                         input_info.pixel->ps_dual_source_blend &&
 					                         export_info.index < 2;
+					const uint32_t location =
+					    program.stage == ShaderType::Pixel && input_info.pixel != nullptr &&
+					            export_info.index < std::size(input_info.pixel->target_export_location)
+					        ? input_info.pixel->target_export_location[export_info.index]
+					        : export_info.index;
 					AddOutput(info, StageOutputKind::Mrt, export_info.index,
-					          dual_source ? 0 : export_info.index,
+					          dual_source ? 0 : location,
 					          fmt::format("out_mrt_{}", export_info.index),
 					          dual_source ? export_info.index : 0);
 					break;

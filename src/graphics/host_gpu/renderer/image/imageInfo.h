@@ -449,6 +449,32 @@ inline constexpr std::array<VideoOutFormatPolicy, 6> VIDEO_OUT_FORMAT_POLICIES {
 			next.float32[2] = static_cast<float>(packed & 0x3ffu) / 1023.0f;
 			next.float32[3] = static_cast<float>((packed >> 30u) & 0x3u) / 3.0f;
 			break;
+		case vk::Format::eB10G11R11UfloatPack32: {
+			// The clear word holds the target's packed bits: R 11 bits, G 11 bits, B 10 bits, each a
+			// 5-bit exponent (bias 15) over the mantissa. NHL 26 clears a min-blended R11G11B10 mask
+			// to 1.0 this way; dropping the clear leaves it at 0 and blacks out the ice lighting.
+			const auto ufloat = [](uint32_t bits, uint32_t mantissa_bits, bool& finite) {
+				const auto mantissa = bits & ((1u << mantissa_bits) - 1u);
+				const auto exponent = bits >> mantissa_bits;
+				const auto fraction =
+				    static_cast<float>(mantissa) / static_cast<float>(1u << mantissa_bits);
+				if (exponent == 31u) {
+					finite = false;
+					return 0.0f;
+				}
+				return exponent == 0u ? std::ldexp(fraction, -14)
+				                      : std::ldexp(1.0f + fraction, static_cast<int>(exponent) - 15);
+			};
+			bool finite     = true;
+			next.float32[0] = ufloat(packed & 0x7ffu, 6u, finite);
+			next.float32[1] = ufloat((packed >> 11u) & 0x7ffu, 6u, finite);
+			next.float32[2] = ufloat((packed >> 22u) & 0x3ffu, 5u, finite);
+			next.float32[3] = 1.0f;
+			if (!finite) {
+				return false;
+			}
+			break;
+		}
 		default: return false;
 	}
 	clear = next;
