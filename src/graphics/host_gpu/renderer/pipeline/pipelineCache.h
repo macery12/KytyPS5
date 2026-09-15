@@ -216,8 +216,13 @@ private:
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 	Common::Mutex m_mutex;
+	uint32_t      m_pipelines_since_save = 0;
 
 	void InitializeDriverCache();
+	// Both require m_mutex. A crash or EXIT never reaches ~PipelineCache, so the driver cache is
+	// also written every DriverCacheSaveInterval new pipelines while the game runs.
+	void WriteDriverCache();
+	void NoteNewPipeline();
 };
 
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);

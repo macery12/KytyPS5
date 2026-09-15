@@ -1,7 +1,9 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/perfStats.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -111,6 +113,8 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
+	KYTY_PROFILER_BLOCK("MasterSemaphore::Wait", profiler::colors::RedA100);
+	PerfStats::ScopedDuration wait_time(PerfStats::Duration::GpuWait);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();

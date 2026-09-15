@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/perfStats.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -420,6 +421,7 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode) {
+	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ctx    = buffer.GetRegisters();
@@ -516,6 +518,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
+	PerfStats::Add(PerfStats::Counter::Dispatches);
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchDirect), submit_id,
 	                    thread_group_x, thread_group_y, thread_group_z, mode,
 	                    sh_ctx.GetCs().cs_regs.data_addr);
@@ -676,10 +679,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	buffer.NoteDebugShader(program.shader_hash);
 	{
-		const auto label = fmt::format("Guest CS 0x{:016x} hash=0x{:016x} groups={}x{}x{}",
-		                               sh_ctx.GetCs().cs_regs.data_addr, program.shader_hash,
-		                               thread_group_x, thread_group_y, thread_group_z);
-		VulkanDebugLabelScope scope(vk_buffer, label.c_str());
+		std::string label;
+		if (GpuDebugLabelsEnabled()) {
+			label = fmt::format("Guest CS 0x{:016x} hash=0x{:016x} groups={}x{}x{}",
+			                    sh_ctx.GetCs().cs_regs.data_addr, program.shader_hash,
+			                    thread_group_x, thread_group_y, thread_group_z);
+		}
+		VulkanDebugLabelScope scope(vk_buffer, label.empty() ? nullptr : label.c_str());
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	if (nan_trace) {

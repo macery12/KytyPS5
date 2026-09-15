@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/perfStats.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
@@ -1097,6 +1098,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
+	KYTY_PROFILER_FUNCTION();
+	PerfStats::Add(PerfStats::Counter::Draws);
 	auto& ucfg = buffer.GetUserConfig();
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
@@ -1216,9 +1219,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	{
 		// Name the draw for GPU crash tools (RGD), which otherwise only report driver-level
-		// Draw(VertexCount, InstanceCount) markers. Skip formatting when labels are unavailable.
+		// Draw(VertexCount, InstanceCount) markers. Formatted only when labels are enabled.
 		std::string label;
-		if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginDebugUtilsLabelEXT != nullptr) {
+		if (GpuDebugLabelsEnabled()) {
 			const uint64_t vs_hash = state.vertex_info[0].stage.program->shader_hash;
 			const uint64_t ps_hash =
 			    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;

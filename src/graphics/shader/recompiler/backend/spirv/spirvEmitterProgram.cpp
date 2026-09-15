@@ -9,6 +9,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -21,9 +22,9 @@ namespace {
 // budget of loop-header visits shared by all of its loops. Once it is spent, guarded headers
 // leave their loop, so a runaway guest loop (for example one bounded by a wrong lane prefix sum)
 // produces wrong output instead of a GPU hang. Only headers that already branch to their merge
-// block are guarded, so no CFG edge or phi entry is added. It is on by default because NHL 26
-// hangs the GPU in several shaders without it (3b25cdb347182b6d, 613d940c02920148,
-// 8d295cd700d92594). If a hang persists with the guard armed, it is not a runaway loop.
+// block are guarded, so no CFG edge or phi entry is added. By default only the NHL 26 shaders that
+// hang the GPU without it are guarded (see KYTY_SHADER_LOOP_GUARD_HASHES in EmitProgram). If a hang
+// persists with the guard armed, it is not a runaway loop.
 uint32_t LoopGuardLimitFromEnvironment() {
 	static const uint32_t limit = [] {
 		constexpr uint32_t default_limit = 4096;
@@ -792,31 +793,45 @@ void EmitProgram(EmitterState& state) {
 			break;
 		}
 	}
-	// KYTY_SHADER_LOOP_GUARD_HASHES=<hash>[,<hash>...] restricts the loop guard to the listed shaders.
-	// The shared per-invocation budget also truncates legitimate nested loops (NHL 26's cloth
-	// constraint solver 523e815d5f8ad134 runs iterations x constraints x neighbours between
-	// barriers), which desynchronizes lanes and poisons simulated vertices with NaN.
-	static const std::vector<uint64_t> guard_hashes = [] {
-		std::vector<uint64_t> list;
-		if (const char* value = std::getenv("KYTY_SHADER_LOOP_GUARD_HASHES"); value != nullptr) {
-			std::string text(value);
-			for (size_t start = 0; start < text.size();) {
-				const auto end  = text.find(',', start);
-				const auto item = text.substr(start, end == std::string::npos ? end : end - start);
-				if (!item.empty()) {
-					list.push_back(std::strtoull(item.c_str(), nullptr, 16));
-				}
-				if (end == std::string::npos) {
-					break;
-				}
-				start = end + 1;
-			}
+	// KYTY_SHADER_LOOP_GUARD_HASHES=<hash>[,<hash>...] selects the shaders that get the loop guard;
+	// "*" selects every shader. The default list holds the NHL 26 shaders whose runaway loops hang
+	// the GPU. Guarding everything is not free: every loop exit edge updates the counter in each
+	// invocation, and the shared budget truncates legitimate nested loops (NHL 26's cloth constraint
+	// solver 523e815d5f8ad134 runs iterations x constraints x neighbours between barriers), which
+	// desynchronizes lanes and poisons simulated vertices with NaN.
+	struct GuardSelection {
+		bool                  all = false;
+		std::vector<uint64_t> hashes;
+	};
+	static const GuardSelection guard_selection = [] {
+		GuardSelection selection;
+		const char*    value = std::getenv("KYTY_SHADER_LOOP_GUARD_HASHES");
+		if (value == nullptr || *value == '\0') {
+			selection.hashes = {0x3b25cdb347182b6dull, 0x613d940c02920148ull, 0x8d295cd700d92594ull};
+			return selection;
 		}
-		return list;
+		if (std::string_view(value) == "*") {
+			selection.all = true;
+			return selection;
+		}
+		std::string text(value);
+		for (size_t start = 0; start < text.size();) {
+			const auto end  = text.find(',', start);
+			const auto item = text.substr(start, end == std::string::npos ? end : end - start);
+			if (!item.empty()) {
+				selection.hashes.push_back(std::strtoull(item.c_str(), nullptr, 16));
+			}
+			if (end == std::string::npos) {
+				break;
+			}
+			start = end + 1;
+		}
+		return selection;
 	}();
 	const bool guard_selected =
-	    guard_hashes.empty() ||
-	    std::ranges::find(guard_hashes, state.program.shader_hash) != guard_hashes.end();
+	    guard_selection.all ||
+	    std::ranges::find(guard_selection.hashes, state.program.shader_hash) !=
+	        guard_selection.hashes.end();
 	if (const auto limit = LoopGuardLimitFromEnvironment(); limit != 0 && guard_selected) {
 		state.loop_guard_variable = state.builder.AllocateId();
 		state.loop_guard_limit    = limit;

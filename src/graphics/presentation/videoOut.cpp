@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/host_gpu/perfStats.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -1497,6 +1498,8 @@ void VideoOutDriver::WaitFlipDone(int handle, int index) {
 	EXIT_IF(ctx == nullptr);
 
 	EXIT_NOT_IMPLEMENTED(!IsValidBufferIndex(index));
+	KYTY_PROFILER_BLOCK("VideoOutDriver::WaitFlipDone", profiler::colors::Blue300);
+	Graphics::PerfStats::ScopedDuration wait_time(Graphics::PerfStats::Duration::FlipWait);
 	m_impl->GetFlipQueue().Wait(*ctx, index);
 }
 

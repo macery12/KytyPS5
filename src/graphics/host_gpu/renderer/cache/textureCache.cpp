@@ -1357,6 +1357,7 @@ void TextureCache::PrepareCmaskClear(ImageId id, const ImageDesc& desc) {
 }
 
 void TextureCache::RefreshImage(ImageId id) {
+	KYTY_PROFILER_FUNCTION();
 	TrackImage(id);
 	auto& image = m_slot_images[id];
 	if (image.IsMaybeCpuDirty()) {
@@ -1419,6 +1420,7 @@ void TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+	KYTY_PROFILER_FUNCTION();
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");

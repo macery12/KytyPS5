@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <span>
 #include <string>
@@ -29,6 +30,18 @@ using VulkanMemoryBarrier = vk::MemoryBarrier;
 vk::Format  VulkanFormat(Prospero::BufferFormat guest_format);
 void        RequireVulkanSuccess(vk::Result result, const char* operation);
 vk::ShaderModule CompileSPV(std::span<const uint32_t> code, vk::Device device);
+
+// Guest draws and dispatches are named in the command stream for GPU crash tools (Radeon GPU
+// Detective, RenderDoc) only on request: formatting a label for every draw costs measurable CPU
+// in busy scenes. KYTY_GPU_LABELS=1 or the graphics debug dump enables them.
+[[nodiscard]] inline bool GpuDebugLabelsEnabled() noexcept {
+	static const bool requested = [] {
+		const char* value = std::getenv("KYTY_GPU_LABELS");
+		return (value != nullptr && value[0] == '1' && value[1] == '\0') ||
+		       Config::GraphicsDebugDumpEnabled();
+	}();
+	return requested && VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginDebugUtilsLabelEXT != nullptr;
+}
 
 class VulkanDebugLabelScope {
 public:
