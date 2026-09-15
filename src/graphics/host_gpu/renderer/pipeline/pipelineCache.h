@@ -30,6 +30,11 @@ class UserConfig;
 struct ComputeShaderInfo;
 } // namespace HW
 
+namespace PipelineRecord {
+class RecordFile;
+struct Records;
+} // namespace PipelineRecord
+
 #pragma pack(push, 1)
 
 struct PipelineStaticParameters {
@@ -217,12 +222,20 @@ private:
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 	Common::Mutex m_mutex;
 	uint32_t      m_pipelines_since_save = 0;
+	std::unique_ptr<PipelineRecord::RecordFile> m_record;
 
 	void InitializeDriverCache();
 	// Both require m_mutex. A crash or EXIT never reaches ~PipelineCache, so the driver cache is
 	// also written every DriverCacheSaveInterval new pipelines while the game runs.
 	void WriteDriverCache();
 	void NoteNewPipeline();
+	// Shader warm-up (--pre-gen): opens the record of programs and pipelines compiled by earlier runs,
+	// compiles them on worker threads before the guest starts, and records new ones as they appear.
+	void InitializeShaderRecord();
+	void WarmUp(PipelineRecord::Records& records);
+	void RecordGraphicsPipeline(const GraphicsPipelineKey&             key,
+	                            std::span<const ShaderVertexInputInfo> vertex_info,
+	                            const ShaderPixelInputInfo*            ps_input_info);
 };
 
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);

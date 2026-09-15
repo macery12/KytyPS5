@@ -18,9 +18,12 @@ struct ShaderParams {
 	std::vector<uint32_t>     user_data;
 	uint64_t                  hash = 0;
 	std::span<const uint32_t> back_code;
+	// Guest address of `code`. Shader warm-up replays recorded code from host memory and sets the
+	// original address here; otherwise the span itself is the guest mapping.
+	uint64_t                  base = 0;
 
 	[[nodiscard]] uint64_t Base() const {
-		return reinterpret_cast<uint64_t>(code.data());
+		return base != 0 ? base : reinterpret_cast<uint64_t>(code.data());
 	}
 };
 

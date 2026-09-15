@@ -75,6 +75,10 @@ bool ShaderValidationEnabled() {
 	return g_config->shader_validation_enabled;
 }
 
+bool PreGenEnabled() {
+	return g_config->pre_gen_enabled;
+}
+
 ShaderOptimizationType GetShaderOptimizationType() {
 	return g_config->shader_optimization_type;
 }
