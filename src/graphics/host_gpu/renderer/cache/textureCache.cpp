@@ -69,8 +69,8 @@ enum TraceDccCategory : uint32_t { TraceDccFill, TraceDccDecision, TraceDccMiss,
 	return key;
 }
 
-[[nodiscard]] bool DecodeDccClear(const TextureCache::ImageDesc& desc, vk::Format format,
-                                  uint8_t code, vk::ClearColorValue& clear) {
+[[nodiscard]] bool DecodeDccClear(const TextureCache::ImageDesc& desc, uint8_t code,
+                                  vk::ClearColorValue& clear) {
 	switch (code) {
 		case 0x00:
 		case 0x20:
@@ -80,6 +80,7 @@ enum TraceDccCategory : uint32_t { TraceDccFill, TraceDccDecision, TraceDccMiss,
 		default: return false;
 	}
 	const auto& metadata = desc.info.metadata;
+	const auto  format   = desc.view_info.format;
 	if (code == 0x20) {
 		// Clear-to-register is a color-buffer operation; the texture pipe cannot decode it.
 		return desc.type == TextureCache::BindingType::RenderTarget &&
@@ -1201,7 +1202,6 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 		return;
 	}
 	const auto range = desc.info.metadata.range;
-	vk::Format format;
 	{
 		std::scoped_lock lock {m_lock};
 		auto& image         = m_slot_images[id];
@@ -1211,7 +1211,6 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 		if (range.size == 0 || desc.info.resources.levels != 1 || image.info.resources.levels != 1) {
 			return;
 		}
-		format = image.backing.format;
 	}
 	const auto layers = desc.info.TransferLayers();
 	// These one-mip surfaces use complete 4 KiB DCC metadata blocks.
@@ -1241,7 +1240,7 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 			EXIT("TextureCache: failed to read DCC metadata backing\n");
 		}
 		vk::ClearValue clear {};
-		if (!DecodeDccClear(desc, format, code, clear.color)) {
+		if (!DecodeDccClear(desc, code, clear.color)) {
 			continue;
 		}
 		std::vector<uint8_t> bytes(slice_size);
@@ -1253,7 +1252,7 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 		}
 		{
 			std::scoped_lock lock {m_lock};
-			ClearImage(m_scheduler.Current(), id,
+			ClearImage(m_scheduler.Current(), id, view.format,
 			           {vk::ImageAspectFlagBits::eColor, view.base_level, view.level_count,
 			            image_first + slice, 1}, clear);
 		}
@@ -1350,7 +1349,7 @@ void TextureCache::PrepareCmaskClear(ImageId id, const ImageDesc& desc) {
 		do {
 			mask |= 1u << layer++;
 		} while (layer < first + count && (metadata.clear_mask & (1u << layer)) != 0);
-		ClearImage(m_scheduler.Current(), id,
+		ClearImage(m_scheduler.Current(), id, image.backing.format,
 		           {vk::ImageAspectFlagBits::eColor, view.base_level, 1, start, layer - start}, clear);
 		metadata.clear_mask &= ~mask;
 	}
@@ -1764,12 +1763,12 @@ bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address
 		}
 		clear.depthStencil.stencil = stencil_clear;
 	}
-	ClearImage(command, selected,
+	ClearImage(command, selected, image.backing.format,
 	           {aspect, 0, image.info.resources.levels, 0, image.info.TransferLayers()}, clear);
 	return true;
 }
 
-void TextureCache::ClearImage(CommandBuffer& command, ImageId id,
+void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format format,
                               const vk::ImageSubresourceRange& range, const vk::ClearValue& clear) {
 	auto& image = m_slot_images[id];
 	const auto aspects = image.info.IsDepth() ? ImageViewOps::DepthAspectMask(image.backing.format)
@@ -1803,11 +1802,12 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id,
 		}
 	}
 	command.EndRendering();
-	if (image.info.IsVolume() && !full_image) {
+	// Transfer clears use the backing format; aliased clears must encode through their view.
+	if (format != image.backing.format || (image.info.IsVolume() && !full_image)) {
 		EXIT_NOT_IMPLEMENTED(range.aspectMask != vk::ImageAspectFlagBits::eColor ||
 		                     range.levelCount != 1);
 		ImageViewInfo view {};
-		view.format = image.backing.format;
+		view.format = format;
 		view.type   = range.layerCount == 1 ? vk::ImageViewType::e2D : vk::ImageViewType::e2DArray;
 		view.base_level  = range.baseMipLevel;
 		view.base_layer  = range.baseArrayLayer;

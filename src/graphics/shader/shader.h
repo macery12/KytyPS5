@@ -157,6 +157,7 @@ struct ShaderPixelInputInfo {
 	uint32_t                                       ps_system_input_base         = 0;
 	uint32_t                                       custom_interpolation_mask    = 0;
 	uint32_t                                       ps_perspective_center_vgpr   = UINT32_MAX;
+	uint32_t                                       ps_perspective_centroid_vgpr = UINT32_MAX;
 	uint8_t                                        target_output_mode[8]        = {};
 	// Guest MRT slot (SPIR-V output location) fed by each MRT export index. The hardware
 	// packs exports onto the slots enabled in CB_SHADER_MASK, in slot order.
