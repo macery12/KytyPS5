@@ -3587,6 +3587,8 @@ void TestNewShaderRecompilerBootB16PackedAndSdwaOpcodes() {
       0x261418f9u,
       0x0686149fu, // v_min_u32 v10.word0, 31, v12; preserve upper destination
                    // word
+      0x220404f9u,
+      0x00060605u, // captured v_min_i32 v2, v5, v2.byte0 (SDWA)
       0xbf810000u,
   };
 
@@ -3641,6 +3643,9 @@ void TestNewShaderRecompilerBootB16PackedAndSdwaOpcodes() {
         "new decoder did not decode V_SUB_NC_U32 SDWA byte-2 destination");
   Check(Common::ContainsStr(result.decoded_dump, "v_min_u32 v10.sdwa(sel=4"),
         "new decoder did not decode V_MIN_U32 SDWA low-word destination");
+  Check(Common::ContainsStr(result.decoded_dump,
+                            "v_min_i32 v2, v5, v2.sdwa(sel=0,sext=0)"),
+        "new decoder did not decode captured V_MIN_I32 SDWA byte source");
   Check(
       !Common::ContainsStr(result.decoded_dump,
                            "unsupported family=VOP2 opcode=0x00"),
@@ -12349,12 +12354,13 @@ void TestSrtWalkerRealSBufferTranslation() {
             std::equal(flat.begin(), flat.end(), table.begin() + 1),
         "real S_BUFFER_LOAD walk used the wrong final alignment");
 
+  // Shrinking the descriptor puts the last word out of bounds; like the emitted shader, that
+  // element reads zero while the in-bounds words are unchanged.
   user_data[10] = 4 * sizeof(uint32_t);
-  const auto flat_before_failure = flat;
   const auto bounds_walked = ShaderRecompiler::IR::WalkSrt(ir, runtime, flat);
-  Check(!bounds_walked, "real S_BUFFER_LOAD walk ignored descriptor bounds");
-  Check(flat == flat_before_failure,
-        "failed real S_BUFFER_LOAD walk changed the prior flat snapshot");
+  Check(bounds_walked, "real S_BUFFER_LOAD walk failed on an out-of-bounds element");
+  Check(flat == std::vector<uint32_t>{table[1], table[2], table[3], 0u},
+        "real S_BUFFER_LOAD walk did not zero only the out-of-bounds element");
   CheckFlattenedReadSlots(
       ir, 4, "real S_BUFFER_LOAD patch used the wrong flat offsets");
 

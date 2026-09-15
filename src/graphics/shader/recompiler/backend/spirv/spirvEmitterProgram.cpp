@@ -807,7 +807,9 @@ void EmitProgram(EmitterState& state) {
 		GuardSelection selection;
 		const char*    value = std::getenv("KYTY_SHADER_LOOP_GUARD_HASHES");
 		if (value == nullptr || *value == '\0') {
-			selection.hashes = {0x3b25cdb347182b6dull, 0x613d940c02920148ull, 0x8d295cd700d92594ull};
+			selection.hashes = {0x3b25cdb347182b6dull, 0x613d940c02920148ull, 0x8d295cd700d92594ull,
+			                    // PPSA34299: TDR in the submission drawing with these shaders.
+			                    0x6a9f8d13c2d92663ull, 0x4dba4a9e45900c89ull, 0xba0eb9a6b6aea4b2ull};
 			return selection;
 		}
 		if (std::string_view(value) == "*") {

@@ -5,9 +5,12 @@
 
 #include <algorithm>
 #include <bit>
+#include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -467,7 +470,31 @@ public:
 		return true;
 	}
 
+	// Innermost reason the last failed evaluation gave up; empty when none was recorded.
+	[[nodiscard]] const std::string& LastFailure() const { return m_failure; }
+
+	// True when a failure came from IR the evaluator cannot model per draw (unsupported opcodes,
+	// undefined values) rather than from guest memory or bounds, which must stay hard failures.
+	[[nodiscard]] bool StructuralFailure() const { return m_structural_failure; }
+
+	void ResetFailure() {
+		m_failure.clear();
+		m_structural_failure = false;
+	}
+
 private:
+	bool Fail(std::string message) {
+		if (m_failure.empty()) {
+			m_failure = std::move(message);
+		}
+		return false;
+	}
+
+	bool FailStructural(std::string message) {
+		m_structural_failure = true;
+		return Fail(std::move(message));
+	}
+
 	static float Float32(uint64_t bits) {
 		return std::bit_cast<float>(static_cast<uint32_t>(bits));
 	}
@@ -512,7 +539,8 @@ private:
 		const bool evaluated = EvaluateInst(*inst, out);
 		m_visiting.pop_back();
 		if (!evaluated) {
-			return false;
+			return Fail(fmt::format("opcode {} (args={}) could not be evaluated",
+			                        static_cast<uint32_t>(inst->GetOpcode()), inst->NumArgs()));
 		}
 		m_cache.emplace(inst, out);
 		result = out;
@@ -592,31 +620,33 @@ private:
 			if (handle->NumArgs() != 4u || !Arg(*handle, 2, records) || !Arg(*handle, 3, word3)) {
 				return false;
 			}
-			if (immediate < 0) {
-				return false;
-			}
-			const auto byte_offset =
-			    static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
+			// Mirror EmitReadConstBuffer: the offset wraps in 32 bits and an out-of-bounds read
+			// yields zero rather than faulting.
+			const auto byte_offset = static_cast<uint64_t>(
+			    static_cast<uint32_t>(offset) + static_cast<uint32_t>(mem.offset));
 			const auto aligned = byte_offset & ~uint64_t {3};
 			const auto stride  = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
 			const auto size = stride == 0u
 			                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
 			                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
 			if (aligned > size || size - aligned < sizeof(uint32_t)) {
-				return false;
+				result = 0;
+				return true;
 			}
-			address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
+			address = (base & ~uint64_t {3}) + aligned;
 		} else {
 			const auto relative = (immediate & ~int64_t {3}) +
 			                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
 			if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
-				return false;
+				return Fail(fmt::format("LoadAddressU32 address overflow base=0x{:x} relative={}",
+				                        base, relative));
 			}
 		}
 		uint32_t word = 0;
 		if (m_runtime.read_memory != nullptr) {
 			if (!m_runtime.read_memory(m_runtime.userdata, address, &word)) {
-				return false;
+				return Fail(fmt::format("guest read failed at 0x{:x} (base=0x{:x} opcode={})",
+				                        address, base, static_cast<uint32_t>(inst.GetOpcode())));
 			}
 		} else {
 			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
@@ -638,7 +668,8 @@ private:
 				const auto reg = RegIndex(inst.Arg(0).ScalarRegister());
 				if (reg < m_program.user_data_base ||
 				    reg - m_program.user_data_base >= m_runtime.user_data.size()) {
-					return false;
+					return Fail(fmt::format("user data reg {} outside base {} count {}", reg,
+					                        m_program.user_data_base, m_runtime.user_data.size()));
 				}
 				result = m_runtime.user_data[reg - m_program.user_data_base];
 				return true;
@@ -648,7 +679,12 @@ private:
 			case ValueOpcode::ReadFirstLane: {
 				Evaluator active(m_program, m_runtime, m_clean_flat_slots, m_clean_evaluator,
 				                 inst.Arg(1));
-				return active.EvaluateWide(inst.Arg(0), result);
+				if (!active.EvaluateWide(inst.Arg(0), result)) {
+					return active.StructuralFailure()
+					           ? FailStructural("ReadFirstLane: " + active.LastFailure())
+					           : Fail("ReadFirstLane: " + active.LastFailure());
+				}
+				return true;
 			}
 			case ValueOpcode::BitCastU32F32:
 			case ValueOpcode::BitCastF32U32: return Arg(inst, 0, result);
@@ -950,10 +986,11 @@ private:
 			case ValueOpcode::UndefU8:
 			case ValueOpcode::UndefU16:
 			case ValueOpcode::UndefU32:
-			case ValueOpcode::UndefU64: return false;
+			case ValueOpcode::UndefU64: return FailStructural("value is undefined on some path");
 			default: break;
 		}
-		return false;
+		return FailStructural(fmt::format("opcode {} is not supported by the SRT evaluator",
+		                                  static_cast<uint32_t>(inst.GetOpcode())));
 	}
 
 	const ResourcePlan&                       m_program;
@@ -964,6 +1001,8 @@ private:
 	std::unordered_map<const Inst*, uint64_t> m_cache;
 	std::vector<const Inst*>                  m_visiting;
 	bool                                      m_reserved = false;
+	std::string                               m_failure;
+	bool                                      m_structural_failure = false;
 };
 
 const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
@@ -1034,6 +1073,11 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 		if (!evaluate_flat || active[source_index]) {
 			for (uint32_t index = 0; index < source->dword_count; index++) {
 				if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
+					std::fprintf(stderr,
+					             "SRT walk: source %u dword %u/%u failed: %s | clean: %s\n",
+					             source_index, index, source->dword_count,
+					             evaluator.LastFailure().c_str(),
+					             clean_evaluator.LastFailure().c_str());
 					return false;
 				}
 			}
@@ -1047,9 +1091,34 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			const bool clean    = read.flat_offset < clean_flat_slots.size() &&
 			                      clean_flat_slots[read.flat_offset] != 0u;
 			auto&      selected = clean ? clean_evaluator : evaluator;
-			if (read.flat_offset >= flattened.size() ||
-			    !selected.Evaluate(read.value, flattened[read.flat_offset])) {
+			if (read.flat_offset >= flattened.size()) {
 				return false;
+			}
+			evaluator.ResetFailure();
+			clean_evaluator.ResetFailure();
+			if (!selected.Evaluate(read.value, flattened[read.flat_offset])) {
+				// A flattened word built from IR with no single per-draw value (per-lane state,
+				// e.g. reads left behind by a texture degraded to a null image) is zeroed rather
+				// than dropping the draw. Guest memory and bounds failures stay transactional.
+				if (!evaluator.StructuralFailure() && !clean_evaluator.StructuralFailure()) {
+					return false;
+				}
+				flattened[read.flat_offset] = 0u;
+				static std::mutex                                     reported_mutex;
+				static std::unordered_set<uint64_t>                   reported;
+				const auto key = program.shader_hash ^ (uint64_t {read.flat_offset} << 48u);
+				bool       first = false;
+				{
+					std::lock_guard lock(reported_mutex);
+					first = reported.insert(key).second;
+				}
+				if (first) {
+					std::fprintf(stderr,
+					             "SRT walk: hash=0x%016" PRIx64
+					             " flat slot %u (%s) is not per-draw constant (%s); using 0\n",
+					             program.shader_hash, read.flat_offset, clean ? "clean" : "raw",
+					             (clean ? clean_evaluator : evaluator).LastFailure().c_str());
+				}
 			}
 		}
 	}

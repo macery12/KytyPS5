@@ -7,11 +7,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
 #include <functional>
+#include <mutex>
 #include <numeric>
 #include <unordered_set>
 
@@ -206,10 +209,11 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 	ShaderBufferResource heap;
 	if (!DecodeBufferDescriptor(material_value, material) ||
 	    !DecodeBufferDescriptor(heap_value, heap)) {
-		return false;
+		return SpecializationFail("indirect image material or heap is not a buffer descriptor");
 	}
 	if (material.Stride() != indirect.selector_stride) {
-		return false;
+		return SpecializationFail(fmt::format("indirect image material stride {} != selector {}",
+		                                      material.Stride(), indirect.selector_stride));
 	}
 
 	// S_BUFFER_LOAD ignores vector-buffer swizzle/add-thread fields. The shader computes the
@@ -221,17 +225,40 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 	const auto limit       = std::min<uint64_t>(UINT32_MAX, size + 3u);
 	const auto probe_count = residue <= limit ? (limit - residue) / step + 1u : 0u;
 	if (probe_count > MaxIndirectImageProbes) {
-		return false;
+		return SpecializationFail(fmt::format("indirect image needs {} probes (limit {})",
+		                                      probe_count, MaxIndirectImageProbes));
 	}
 
 	std::vector<uint32_t>        keys {0u};
 	std::unordered_set<uint32_t> seen {0u};
+	uint64_t                     unreadable_probes = 0;
 	keys.reserve(static_cast<size_t>(probe_count) + 1u);
 	seen.reserve(static_cast<size_t>(probe_count) + 1u);
 	for (uint64_t offset = residue; offset <= limit && probe_count != 0u; offset += step) {
 		uint32_t key = 0;
+		// A probe over GPU-dirty or unbacked memory cannot be proven clean. Skip it instead of
+		// failing the whole table: the shader still reads its real key at runtime, and an unlisted
+		// key falls back to candidate 0 (one wrong texture, not a lost draw).
 		if (!ReadScalarBufferWord(material, static_cast<uint32_t>(offset), 0u, runtime, key)) {
-			return false;
+			// Materialization reruns for every draw that misses its memo; report each material
+			// buffer once rather than once per walk.
+			static std::mutex                   reported_mutex;
+			static std::unordered_set<uint64_t> reported_bases;
+			const bool                          first_for_base = [&] {
+				std::lock_guard lock(reported_mutex);
+				return reported_bases.insert(material.Base48()).second;
+			}();
+			if (unreadable_probes++ == 0u && first_for_base) {
+				std::fprintf(stderr,
+				             "indirect image: skipping unreadable material probe at 0x%" PRIx64
+				             " (base=0x%" PRIx64 " size=0x%" PRIx64 " stride=%u)\n",
+				             (material.Base48() & ~uint64_t {3}) + (offset & ~uint64_t {3}),
+				             material.Base48(), size, indirect.selector_stride);
+			}
+			if (limit - offset < step) {
+				break;
+			}
+			continue;
 		}
 		if (seen.insert(key).second) {
 			keys.push_back(key);
@@ -249,12 +276,19 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 	for (const auto key: next.keys) {
 		DescriptorValue candidate;
 		candidate.dword_count  = 8u;
-		const auto heap_offset = key << 5u;
-		for (uint32_t dword = 0; dword < candidate.dword_count; dword++) {
-			if (!ReadScalarBufferWord(heap, heap_offset, dword * sizeof(uint32_t), runtime,
-			                          candidate.dwords[dword])) {
-				return false;
-			}
+		const auto heap_offset   = key << 5u;
+		bool       heap_readable = true;
+		for (uint32_t dword = 0; dword < candidate.dword_count && heap_readable; dword++) {
+			heap_readable = ReadScalarBufferWord(heap, heap_offset, dword * sizeof(uint32_t),
+			                                     runtime, candidate.dwords[dword]);
+		}
+		if (!heap_readable) {
+			// Same policy as material probes: an unprovable descriptor binds as a null image.
+			std::fprintf(stderr,
+			             "indirect image: heap descriptor for key 0x%x is unreadable (base=0x%" PRIx64
+			             " size=0x%" PRIx64 "); binding a null image\n",
+			             key, heap.Base48(), heap.GetSize());
+			candidate.dwords.fill(0);
 		}
 		if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
 			candidate.dwords.fill(0);
@@ -262,7 +296,7 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 		const auto found = std::ranges::find(next.descriptors, candidate);
 		if (found == next.descriptors.end()) {
 			if (next.descriptors.size() >= ShaderInfo::MaxImages) {
-				return false;
+				return SpecializationFail("indirect image has more distinct textures than MaxImages");
 			}
 			next.descriptors.push_back(candidate);
 			next.candidates.push_back(static_cast<uint32_t>(next.descriptors.size() - 1u));
@@ -279,18 +313,22 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
                                 MaterializedSnapshot& snapshot) {
 	if (!program.resource_tracking_complete) {
-		return false;
+		return SpecializationFail("resource tracking is incomplete");
 	}
 
 	if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
-		return false;
+		return SpecializationFail("plan requires specialization memory but no reader was given");
 	}
 	std::vector<DescriptorValue> values;
 	std::vector<uint32_t>        flattened_srt;
 	std::vector<uint8_t>         active_sources;
 	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
 	                            flattened_srt, program.clean_flat_slots, active_sources)) {
-		return false;
+		return SpecializationFail(fmt::format(
+		    "SRT walk failed for {} sources (buffers={} images={} samplers={} user_data={} base=0x{:x})",
+		    program.materialization_sources.size(), program.info.buffers.size(),
+		    program.info.images.size(), program.info.samplers.size(), runtime.user_data.size(),
+		    runtime.shader_base));
 	}
 
 	auto&                   next  = snapshot.resources;
@@ -324,14 +362,16 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 			clean_runtime.read_memory      = runtime.read_specialization_memory;
 			std::vector<DescriptorValue> tables;
 			if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
-				return false;
+				return SpecializationFail(fmt::format(
+				    "image {} indirect material/heap descriptor walk failed", image_index));
 			}
 			const auto&   material = tables[0];
 			const auto&   heap     = tables[1];
 			IndirectImage table;
 			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
 			                              runtime, table)) {
-				return false;
+				return SpecializationFail(
+				    fmt::format("image {} indirect image lookup failed", image_index));
 			}
 			next.images[image_index] = table.descriptors[table.candidates[0]];
 			if (table.descriptors.size() > 1u) {
@@ -479,6 +519,28 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 		if (base.resource_class == ImageResourceClass::None ||
 		    (base.atomic && base.resource_class != ImageResourceClass::Storage)) {
 			return SpecializationFail(fmt::format("image resource {} has an invalid class", i));
+		}
+		// A multisample texture cannot back a sampler binding (sampling an MS image is invalid
+		// SPIR-V and Vulkan). This happens when an indirect table probe or a stale key resolves to
+		// an MSAA descriptor for a sampled slot; bind a null image instead of emitting bad code.
+		if (!NullImageDescriptor(descriptor)) {
+			const auto dimension = DescriptorDimension(descriptor, base.dimension);
+			const bool multisample = dimension == Decoder::ImageDimension::Dim2DMsaa ||
+			                         dimension == Decoder::ImageDimension::Dim2DMsaaArray;
+			const bool sampled =
+			    multisample && std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {
+				    return pair.image == base_index;
+			    });
+			if (sampled) {
+				static std::atomic<bool> reported {false};
+				if (!reported.exchange(true)) {
+					std::fprintf(stderr,
+					             "shader resource specialization: image %u resolved to a multisample "
+					             "descriptor in a sampled slot; binding a null image (reported once)\n",
+					             i);
+				}
+				next_snapshot.images[i].dwords.fill(0);
+			}
 		}
 		image.mip_count = StorageMipCount(base, descriptor);
 		if (image.mip_count == 0u) {

@@ -566,7 +566,16 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
 	                               std::chrono::steady_clock::now() - graphics_pipeline_begin)
 	                               .count()));
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		EXIT("vkCreateGraphicsPipelines failed: result=%s vs_hash=0x%016" PRIx64
+		     " ps_hash=0x%016" PRIx64 " topology=%" PRIu32 " color_count=%" PRIu32
+		     " samples=%s tessellation=%s mesh=%s\n",
+		     vk::to_string(result).c_str(), vs_input_info.stage.program->shader_hash,
+		     ps_active ? ps_input_info->stage.program->shader_hash : 0,
+		     static_cast<uint32_t>(static_params.topology), rendering.color_count,
+		     vk::to_string(multisampling.rasterizationSamples).c_str(),
+		     tessellation ? "true" : "false", mesh ? "true" : "false");
+	}
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 

@@ -534,8 +534,13 @@ struct PipelineCache::ProgramCache {
 		KYTY_PROFILER_END_BLOCK;
 		if (entry == programs.end()) {
 			auto resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-			                                                    specialization));
+			if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+			                                                specialization)) {
+				EXIT("resource materialization failed: stage=%u hash=0x%016" PRIx64
+				     " code_words=%zu user_data=%zu (see 'shader resource specialization failed' above)",
+				     static_cast<unsigned>(stage), params.hash, params.code.size(),
+				     params.user_data.size());
+			}
 			entry = programs.try_emplace(lookup_key, std::move(resource_plan)).first;
 		}
 		entry->second.permutations.push_back(CompilePermutation(
