@@ -3799,9 +3799,18 @@ static int KYTY_SYSV_ABI SharePlayTerminate() {
 	return 0;
 }
 
+static int KYTY_SYSV_ABI SharePlayUnknownMCXJlWdi(uint64_t arg0, uint64_t arg1) {
+	PRINT_NAME();
+
+	LOGF("\t args = (0x%016" PRIx64 ", 0x%016" PRIx64 ")\n", arg0, arg1);
+
+	return 0;
+}
+
 LIB_DEFINE(InitPlatform_1_SharePlay) {
 	LIB_FUNC("isruqthpYcw", LibSharePlay::SharePlayInitialize);
 	LIB_FUNC("UaLjloJinow", LibSharePlay::SharePlayTerminate);
+	LIB_FUNC("+MCXJlWdi+s", LibSharePlay::SharePlayUnknownMCXJlWdi);
 }
 
 } // namespace LibSharePlay

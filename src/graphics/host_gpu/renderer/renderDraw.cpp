@@ -829,7 +829,26 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, bool auto_draw,
 		case Prospero::PrimitiveType::kTriStrip:
 			topology = vk::PrimitiveTopology::eTriangleStrip;
 			break;
-		case Prospero::PrimitiveType::kPatch:
+		case Prospero::PrimitiveType::kPatch: {
+			// NHL 26's local/hull shaders use scalar operands the decoder does not support yet.
+			// Skip patch draws, as before native tessellation; KYTY_ENABLE_TESSELLATION=1
+			// compiles them through the LS/HS/TES path instead.
+			static const bool tessellation_enabled = [] {
+				const char* value = std::getenv("KYTY_ENABLE_TESSELLATION");
+				return value != nullptr && std::strcmp(value, "1") == 0;
+			}();
+			if (!tessellation_enabled) {
+				static std::atomic_bool logged = false;
+				if (!logged.exchange(true, std::memory_order_relaxed)) {
+					std::printf("Skipping patch draws; set KYTY_ENABLE_TESSELLATION=1 to compile "
+					            "them\n");
+					std::fflush(stdout);
+				}
+				return false;
+			}
+			topology = vk::PrimitiveTopology::ePatchList;
+			break;
+		}
 		case Prospero::PrimitiveType::kRectList:
 			topology = vk::PrimitiveTopology::ePatchList;
 			break;

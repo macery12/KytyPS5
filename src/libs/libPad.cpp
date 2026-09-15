@@ -192,6 +192,14 @@ static int KYTY_SYSV_ABI PadUnknownN3kSX62fgNo(uint64_t arg0, uint64_t arg1, uin
 	return OK;
 }
 
+static int KYTY_SYSV_ABI PadUnknownFCWdlnmB1Ks(uint64_t arg0, uint64_t arg1) {
+	PRINT_NAME();
+
+	LOGF("\t args = (0x%016" PRIx64 ", 0x%016" PRIx64 ")\n", arg0, arg1);
+
+	return OK;
+}
+
 LIB_DEFINE(InitPad_1) {
 	PRINT_NAME_ENABLE(true);
 
@@ -218,6 +226,7 @@ LIB_DEFINE(InitPad_1) {
 	LIB_FUNC("RR4novUEENY", Controller::PadSetLightBar);
 	LIB_FUNC("6ncge5+l5Qs", PadClose);
 	LIB_FUNC("n3kSX62fgNo", PadUnknownN3kSX62fgNo);
+	LIB_FUNC("fCWdlnmB1Ks", PadUnknownFCWdlnmB1Ks);
 }
 
 namespace LibMouse {

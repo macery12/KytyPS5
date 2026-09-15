@@ -348,6 +348,22 @@ struct ModuleInfoForUnwind {
 
 static_assert(sizeof(ModuleInfoForUnwind) == 304);
 
+struct KernelModuleSegmentInfo {
+	uint64_t address;
+	uint32_t size;
+	int32_t  protection;
+};
+
+struct KernelModuleInfo {
+	uint64_t                         st_size;
+	char                             name[256];
+	KernelModuleSegmentInfo          segments[4];
+	uint32_t                         num_segments;
+	std::array<uint8_t, 20>          fingerprint;
+};
+
+static_assert(sizeof(KernelModuleInfo) == 352);
+
 #pragma pack()
 
 constexpr size_t PROGNAME_MAX_SIZE = 511;
@@ -1675,6 +1691,71 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 	LOGF("\thandle: %d\n", r->handle);
 
 	return 0;
+}
+
+static int KYTY_SYSV_ABI KernelGetModuleList2(int32_t* handles, uint64_t capacity,
+                                              uint64_t* out_count) {
+	if (handles == nullptr || out_count == nullptr) {
+		return KERNEL_ERROR_EFAULT;
+	}
+
+	auto* rt        = Common::Singleton<Loader::RuntimeLinker>::Instance();
+	auto  module_ids = rt->GetProgramIds();
+	if (capacity < module_ids.size()) {
+		return KERNEL_ERROR_ENOMEM;
+	}
+
+	std::copy(module_ids.begin(), module_ids.end(), handles);
+	*out_count = module_ids.size();
+	return OK;
+}
+
+static int KYTY_SYSV_ABI KernelGetModuleInfo2(int32_t handle, KernelModuleInfo* info) {
+	if (info == nullptr) {
+		return KERNEL_ERROR_EFAULT;
+	}
+	if (info->st_size != sizeof(KernelModuleInfo)) {
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	auto* rt      = Common::Singleton<Loader::RuntimeLinker>::Instance();
+	auto* program = rt->FindProgramById(handle);
+	if (program == nullptr || program->elf == nullptr) {
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	KernelModuleInfo result {};
+	result.st_size = sizeof(result);
+
+	if (program->dynamic_info != nullptr && program->dynamic_info->so_name != nullptr &&
+	    program->dynamic_info->so_name[0] != '\0') {
+		std::snprintf(result.name, sizeof(result.name), "%s", program->dynamic_info->so_name);
+	} else {
+		const auto name = Common::PathToString(program->file_name.filename());
+		std::snprintf(result.name, sizeof(result.name), "%s", name.c_str());
+	}
+
+	const auto* ehdr = program->elf->GetEhdr();
+	const auto* phdr = program->elf->GetPhdr();
+	if (ehdr == nullptr || phdr == nullptr) {
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	for (Loader::Elf64_Half i = 0; i < ehdr->e_phnum && result.num_segments < 4; i++) {
+		if (phdr[i].p_type != Loader::PT_LOAD || phdr[i].p_memsz == 0) {
+			continue;
+		}
+
+		auto& segment      = result.segments[result.num_segments++];
+		segment.address    = program->base_vaddr + phdr[i].p_vaddr;
+		segment.size       = static_cast<uint32_t>(std::min<uint64_t>(phdr[i].p_memsz, UINT32_MAX));
+		segment.protection = ((phdr[i].p_flags & Loader::PF_R) != 0 ? 0x01 : 0) |
+		                     ((phdr[i].p_flags & Loader::PF_W) != 0 ? 0x02 : 0) |
+		                     ((phdr[i].p_flags & Loader::PF_X) != 0 ? 0x04 : 0);
+	}
+
+	*info = result;
+	return OK;
 }
 
 static void KYTY_SYSV_ABI KernelDebugRaiseExceptionOnReleaseMode(int /*c1*/, int /*c2*/) {
@@ -3037,6 +3118,46 @@ int KYTY_SYSV_ABI KernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* use
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelAioWaitRequests(const int32_t* ids, int32_t num, int32_t* states,
+                                        uint32_t mode, uint32_t* usec) {
+	if (ids == nullptr || states == nullptr) {
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	if (num <= 0 || num > KERNEL_AIO_MAX_REQUESTS) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	for (int32_t i = 0; i < num; i++) {
+		if (!kernel_aio_is_valid_id(ids[i])) {
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+	}
+
+	uint32_t waited = 0;
+	for (;;) {
+		bool any_complete = false;
+		bool all_complete = true;
+
+		for (int32_t i = 0; i < num; i++) {
+			states[i] = g_kernel_aio_state[ids[i]].load(std::memory_order_acquire);
+			const bool pending = states[i] == KERNEL_AIO_STATE_SUBMITTED ||
+			                     states[i] == KERNEL_AIO_STATE_PROCESSING;
+			any_complete |= !pending;
+			all_complete &= !pending;
+		}
+
+		if ((mode == 2 && any_complete) || (mode == 1 && all_complete)) {
+			return OK;
+		}
+		if (usec != nullptr && *usec != 0 && waited >= *usec) {
+			return LibKernel::KERNEL_ERROR_ETIMEDOUT;
+		}
+
+		Common::Thread::SleepMicro(10);
+		waited += 10;
+	}
+}
+
 int KYTY_SYSV_ABI KernelAioDeleteRequest(int32_t id, int32_t* ret) {
 	PRINT_NAME();
 
@@ -3379,6 +3500,8 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("AqBioC2vF3I", LibKernel::read);
 	LIB_FUNC("f7KBOafysXo", LibKernel::KernelGetModuleInfoFromAddr);
 	LIB_FUNC("RpQJJVKTiFM", LibKernel::KernelGetModuleInfoForUnwind);
+	LIB_FUNC("ZzzC3ZGVAkc", LibKernel::KernelGetModuleList2);
+	LIB_FUNC("QgsKEUfkqMA", LibKernel::KernelGetModuleInfo2);
 	LIB_FUNC("crb5j7mkk1c", LibKernel::KernelIsSignalReturn); // _is_signal_return
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);
 	LIB_FUNC("FxVZqBAA7ks", LibKernel::write);
@@ -3389,6 +3512,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("HgX7+AORI58", KernelAioSubmitReadCommands);
 	LIB_FUNC("2pOuoWoCxdk", KernelAioPollRequest);
 	LIB_FUNC("KOF-oJbQVvc", KernelAioWaitRequest);
+	LIB_FUNC("lgK+oIWkJyA", KernelAioWaitRequests);
 	LIB_FUNC("XQ8C8y+de+E", KernelAioSubmitWriteCommands);
 	LIB_FUNC("nu4a0-arQis", KernelAioInitializeParam);
 	LIB_FUNC("il03nluKfMk", LibKernel::KernelRaiseException);

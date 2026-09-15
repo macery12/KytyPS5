@@ -189,9 +189,28 @@ LIB_DEFINE(InitAgcDriver_1) {
 
 } // namespace LibGen5Driver
 
+namespace LibAgcDriverStubs {
+
+LIB_VERSION("AgcDriver", 1, "AgcDriver", 1, 1);
+
+static int KYTY_SYSV_ABI AgcDriverUnknownTN0oRTBxJQ(uint64_t arg0, uint64_t arg1) {
+	PRINT_NAME();
+
+	LOGF("\t args = (0x%016" PRIx64 ", 0x%016" PRIx64 ")\n", arg0, arg1);
+
+	return 0;
+}
+
+LIB_DEFINE(InitAgcDriver_1) {
+	LIB_FUNC("+TN0oRTBxJQ", AgcDriverUnknownTN0oRTBxJQ);
+}
+
+} // namespace LibAgcDriverStubs
+
 LIB_DEFINE(InitAgcDriver_1) {
 	LibGen5::InitAgcDriver_1(s);
 	LibGen5Driver::InitAgcDriver_1(s);
+	LibAgcDriverStubs::InitAgcDriver_1(s);
 }
 
 } // namespace Libs

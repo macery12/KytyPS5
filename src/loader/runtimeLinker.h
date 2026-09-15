@@ -179,6 +179,7 @@ public:
 	Program*        FindProgramByAddr(uint64_t vaddr);
 	Program*        FindProgramById(int32_t id);
 	Program*        FindProgramByFileName(const std::filesystem::path& elf_name);
+	std::vector<int32_t> GetProgramIds();
 
 	static uint8_t* TlsGetAddr(Program* program);
 	static void     DeleteTls(Program* program, int thread_id);
