@@ -359,6 +359,8 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
 	}
 	Register(id);
+	// The new buffer covers pages that may still need an upload.
+	m_memory_tracker.NoteCpuDirty();
 	return id;
 }
 

@@ -124,11 +124,24 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void RenderContext::PrepareBda() {
-	std::shared_lock lock(m_mapped_ranges_mutex);
-	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
-		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
-	});
+	KYTY_PROFILER_FUNCTION();
 	m_fault_process_pending = true;
+	// The walk uploads the CPU-dirty pages of every cached buffer in mapped memory, which costs
+	// time proportional to the whole cache on every DMA draw. When no page has become CPU-dirty and
+	// no buffer was created since the last walk began, it would upload nothing.
+	const auto generation = m_buffer_cache.CpuDirtyGeneration();
+	if (generation == m_bda_cpu_dirty_generation) {
+		PerfStats::Add(PerfStats::Counter::BdaSkips);
+		return;
+	}
+	PerfStats::Add(PerfStats::Counter::BdaWalks);
+	{
+		std::shared_lock lock(m_mapped_ranges_mutex);
+		m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
+			m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
+		});
+	}
+	m_bda_cpu_dirty_generation = generation;
 }
 
 void RenderContext::RunGarbageCollector() {

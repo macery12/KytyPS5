@@ -18,6 +18,10 @@ enum class Counter : uint32_t {
 	CpuReadbacks,
 	ShaderCompiles,
 	PipelineCompiles,
+	BdaWalks,
+	BdaSkips,
+	MaterializeHits,
+	MaterializeMisses,
 	Count
 };
 

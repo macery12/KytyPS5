@@ -156,6 +156,76 @@ bool ReplayShaderGuestMemoryRaw(void* userdata, uint64_t address, uint32_t* valu
 	return FindRecordedRead(program->raw_reads, address, value);
 }
 
+// One remembered MaterializeResources result. The walk is a pure function of the resource plan, the
+// user data, the shader base and the guest words it reads, and each read address follows from the
+// earlier inputs. Re-reading the recorded words in order and finding the same values (and the same
+// clean-read validity) therefore reproduces the result exactly without walking the value graph.
+struct MaterializeMemo {
+	struct Read {
+		uint64_t address = 0;
+		uint32_t value   = 0;
+		bool     clean   = false;
+		bool     valid   = false;
+	};
+
+	uint64_t                                     key         = 0;
+	uint64_t                                     shader_base = 0;
+	std::vector<uint32_t>                        user_data;
+	std::vector<Read>                            reads;
+	ShaderRecompiler::IR::ResourceSnapshot       resources;
+	ShaderRecompiler::IR::ResourceSpecialization specialization;
+};
+
+// Memos kept per cached program, replaced round-robin. Walks that read more words than the limit
+// (large indirect image tables) are not remembered.
+constexpr size_t MaxMaterializeMemos     = 16;
+constexpr size_t MaxMaterializeMemoReads = 4096;
+
+bool MaterializeMemoEnabled() {
+	// KYTY_DISABLE_MATERIALIZE_CACHE=1 walks the resource plan on every draw, for A/B tests.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DISABLE_MATERIALIZE_CACHE");
+		return value == nullptr || std::strcmp(value, "1") != 0;
+	}();
+	return enabled;
+}
+
+uint64_t MaterializeMemoKey(std::span<const uint32_t> user_data, uint64_t shader_base) {
+	return XXH3_64bits_withSeed(user_data.data(), user_data.size_bytes(), shader_base);
+}
+
+bool MemoShaderGuestMemory(void* userdata, uint64_t address, uint32_t* value) {
+	const bool valid = ReadShaderGuestMemory(nullptr, address, value);
+	static_cast<std::vector<MaterializeMemo::Read>*>(userdata)->push_back(
+	    {.address = address, .value = valid ? *value : 0u, .clean = true, .valid = valid});
+	return valid;
+}
+
+bool MemoShaderGuestMemoryRaw(void* userdata, uint64_t address, uint32_t* value) {
+	std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+	static_cast<std::vector<MaterializeMemo::Read>*>(userdata)->push_back(
+	    {.address = address, .value = *value, .clean = false, .valid = true});
+	return true;
+}
+
+bool MaterializeMemoReadsMatch(const MaterializeMemo& memo) {
+	for (const auto& read: memo.reads) {
+		uint32_t word = 0;
+		if (read.clean) {
+			const bool valid = ReadShaderGuestMemory(nullptr, read.address, &word);
+			if (valid != read.valid || (valid && word != read.value)) {
+				return false;
+			}
+		} else {
+			std::memcpy(&word, reinterpret_cast<const void*>(read.address), sizeof(word));
+			if (word != read.value) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 // Runs job(0) .. job(count - 1) on up to 32 hardware threads, including the calling thread.
 void ParallelFor(size_t count, const std::function<void(size_t)>& job) {
 	const size_t workers =
@@ -294,6 +364,8 @@ struct PipelineCache::ProgramCache {
 
 		ShaderRecompiler::IR::ResourcePlan resource_plan;
 		std::vector<Permutation>           permutations;
+		std::vector<MaterializeMemo>       memos;
+		size_t                             next_memo = 0;
 	};
 
 	struct ProgramKeyHash {
@@ -354,6 +426,56 @@ struct PipelineCache::ProgramCache {
 		};
 	}
 
+	// MaterializeResources for a cached program, served from its memos when the user data, shader
+	// base and every guest word the last walk read are unchanged.
+	static void MaterializeMemoized(SourceEntry&                                  entry,
+	                                const ShaderRecompiler::IR::SrtRuntime&       runtime,
+	                                ShaderRecompiler::IR::ResourceSnapshot&       resources,
+	                                ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+		if (!MaterializeMemoEnabled()) {
+			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(entry.resource_plan, runtime,
+			                                                    resources, specialization));
+			return;
+		}
+		const auto key  = MaterializeMemoKey(runtime.user_data, runtime.shader_base);
+		auto       memo = std::ranges::find_if(entry.memos, [&](const MaterializeMemo& candidate) {
+			return candidate.key == key && candidate.shader_base == runtime.shader_base &&
+			       std::ranges::equal(candidate.user_data, runtime.user_data);
+		});
+		if (memo != entry.memos.end() && MaterializeMemoReadsMatch(*memo)) {
+			PerfStats::Add(PerfStats::Counter::MaterializeHits);
+			resources      = memo->resources;
+			specialization = memo->specialization;
+			return;
+		}
+		PerfStats::Add(PerfStats::Counter::MaterializeMisses);
+		// The recording raw reader copies guest words exactly like the walker does without one.
+		std::vector<MaterializeMemo::Read> reads;
+		auto                               recording = runtime;
+		recording.read_memory                        = MemoShaderGuestMemoryRaw;
+		recording.userdata                           = &reads;
+		recording.read_specialization_memory         = MemoShaderGuestMemory;
+		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(entry.resource_plan, recording, resources,
+		                                                    specialization));
+		if (reads.size() > MaxMaterializeMemoReads) {
+			return;
+		}
+		if (memo == entry.memos.end()) {
+			if (entry.memos.size() < MaxMaterializeMemos) {
+				memo = entry.memos.emplace(entry.memos.end());
+			} else {
+				memo            = entry.memos.begin() + static_cast<std::ptrdiff_t>(entry.next_memo);
+				entry.next_memo = (entry.next_memo + 1) % MaxMaterializeMemos;
+			}
+		}
+		memo->key         = key;
+		memo->shader_base = runtime.shader_base;
+		memo->user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+		memo->reads          = std::move(reads);
+		memo->resources      = resources;
+		memo->specialization = specialization;
+	}
+
 	template <typename InputInfo>
 	ShaderProgram Get(const ShaderParams& params, InputInfo& input_info,
 	                  uint32_t& push_data_cursor) {
@@ -367,12 +489,14 @@ struct PipelineCache::ProgramCache {
 			stage = ShaderType::Compute;
 		}
 
+		KYTY_PROFILER_BLOCK("ProgramCache::FindProgram");
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = static_cast<uint32_t>(params.user_data.size());
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		BuildStageStaticKey(input_info, lookup_key.static_state);
-		auto                                         entry = programs.find(lookup_key);
+		auto entry = programs.find(lookup_key);
+		KYTY_PROFILER_END_BLOCK;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		const ShaderRecompiler::IR::SrtRuntime       runtime {
@@ -381,8 +505,9 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, resources, specialization));
+			KYTY_PROFILER_BLOCK("ProgramCache::Materialize");
+			MaterializeMemoized(entry->second, runtime, resources, specialization);
+			KYTY_PROFILER_END_BLOCK;
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
@@ -1000,11 +1125,13 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	KYTY_PROFILER_FUNCTION();
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
+	KYTY_PROFILER_BLOCK("PipelineCache::PrepareVertexProgram");
 	if (tess_active) {
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 	} else {
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
+	KYTY_PROFILER_END_BLOCK;
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
 	if (mesh_active) {
 		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
@@ -1026,6 +1153,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	}
 	ShaderParams pixel_params;
 	if (pixel_active) {
+		KYTY_PROFILER_BLOCK("PipelineCache::PreparePixelProgram");
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		// PrepareProgram rebuilds pixel_info from the guest registers, so anything derived
 		// from render state has to be applied after it.
@@ -1049,6 +1177,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
+	KYTY_PROFILER_BLOCK("PipelineCache::LookupPrograms");
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}

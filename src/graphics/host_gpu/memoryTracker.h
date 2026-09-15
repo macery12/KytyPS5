@@ -23,6 +23,14 @@ public:
 
 	KYTY_CLASS_NO_COPY(MemoryTracker);
 
+	// Changes after any tracked page may have become CPU-dirty. A pass that uploaded every
+	// CPU-dirty page while this held one value can be skipped until it changes.
+	[[nodiscard]] uint64_t CpuDirtyGeneration() const noexcept {
+		return m_cpu_dirty_generation.load(std::memory_order_acquire);
+	}
+	// Call after the state change, so a reader that sees the old value also sees the new bits.
+	void NoteCpuDirty() noexcept { m_cpu_dirty_generation.fetch_add(1, std::memory_order_relaxed); }
+
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
@@ -45,6 +53,7 @@ public:
 					return true;
 				}
 				manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
+				NoteCpuDirty();
 				return false;
 			}();
 			if (should_flush) {
@@ -151,6 +160,7 @@ private:
 	std::vector<std::unique_ptr<RegionManager>>    m_region_storage;
 	std::mutex                                     m_region_mutex;
 	PageManager&                                   m_page_manager;
+	std::atomic<uint64_t>                          m_cpu_dirty_generation {0};
 };
 
 } // namespace Libs::Graphics

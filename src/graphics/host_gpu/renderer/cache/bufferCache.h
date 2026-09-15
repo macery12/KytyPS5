@@ -69,6 +69,10 @@ public:
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// See MemoryTracker::CpuDirtyGeneration; buffer creation also advances it.
+	[[nodiscard]] uint64_t CpuDirtyGeneration() const noexcept {
+		return m_memory_tracker.CpuDirtyGeneration();
+	}
 	void               RunGarbageCollector();
 
 private:

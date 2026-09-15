@@ -86,6 +86,10 @@ void OnPresentedFrame() noexcept {
 		TracyPlot("cpu readbacks", static_cast<int64_t>(count(Counter::CpuReadbacks)));
 		TracyPlot("shader compiles", static_cast<int64_t>(count(Counter::ShaderCompiles)));
 		TracyPlot("pipeline compiles", static_cast<int64_t>(count(Counter::PipelineCompiles)));
+		TracyPlot("bda walks", static_cast<int64_t>(count(Counter::BdaWalks)));
+		TracyPlot("bda skips", static_cast<int64_t>(count(Counter::BdaSkips)));
+		TracyPlot("materialize hits", static_cast<int64_t>(count(Counter::MaterializeHits)));
+		TracyPlot("materialize misses", static_cast<int64_t>(count(Counter::MaterializeMisses)));
 		TracyPlot("gpu wait ms", ms(Duration::GpuWait));
 		TracyPlot("sync command ms", ms(Duration::SyncCommand));
 		TracyPlot("flip wait ms", ms(Duration::FlipWait));
@@ -96,13 +100,15 @@ void OnPresentedFrame() noexcept {
 	if (ConsoleEnabled()) {
 		std::printf("PerfStats: interval=%.2fs fps=%.1f draws=%llu dispatches=%llu submits=%llu "
 		            "read_faults=%llu write_faults=%llu readbacks=%llu shaders=%llu/%.0fms "
-		            "pipelines=%llu/%.0fms gpu_wait=%.0fms sync_cmd=%.0fms flip_wait=%.0fms\n",
+		            "pipelines=%llu/%.0fms bda=%llu/%llu mat=%llu/%llu gpu_wait=%.0fms "
+		            "sync_cmd=%.0fms flip_wait=%.0fms\n",
 		            seconds, fps, count(Counter::Draws), count(Counter::Dispatches),
 		            count(Counter::Submits), count(Counter::ReadFaults), count(Counter::WriteFaults),
 		            count(Counter::CpuReadbacks), count(Counter::ShaderCompiles),
 		            ms(Duration::ShaderCompile), count(Counter::PipelineCompiles),
-		            ms(Duration::PipelineCompile), ms(Duration::GpuWait), ms(Duration::SyncCommand),
-		            ms(Duration::FlipWait));
+		            ms(Duration::PipelineCompile), count(Counter::BdaWalks), count(Counter::BdaSkips),
+		            count(Counter::MaterializeHits), count(Counter::MaterializeMisses),
+		            ms(Duration::GpuWait), ms(Duration::SyncCommand), ms(Duration::FlipWait));
 		std::fflush(stdout);
 	}
 }
