@@ -7,6 +7,148 @@
 [![Status](https://img.shields.io/badge/status-early%20development-orange.svg)](#current-status)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 
+KytyPS5 is a free and open-source PlayStation 5 emulator written in C++. Build steps, requirements
+and usage are in the [full project README](#full-project-readme) at the bottom of this page.
+
+> [!IMPORTANT]
+> KytyPS5 is not affiliated with Sony Interactive Entertainment or PlayStation. Use only game files
+> that you have obtained legally.
+
+## Game status
+
+| Game      | Status    | Average FPS |
+| --------- | --------- | ----------- |
+| WWE 2K26  | Main menu | 60 FPS      |
+| NHL 26    | In game   | 10 FPS      |
+
+This was tested and results given by: **AMD Radeon RX 7900 XTX, AMD Ryzen 9 9950X, 64 GB RAM**.
+
+FPS values are approximate averages and will change as work continues.
+
+## Screenshots
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <strong>NHL 26: In game</strong><br>
+      <img src="docs/screenshots/nhl26-ingame.png" width="300" alt="NHL 26 in game running in KytyPS5">
+    </td>
+    <td align="center">
+      <strong>NHL 26: Menu</strong><br>
+      <img src="docs/screenshots/nhl26-menu.png" width="300" alt="NHL 26 menu running in KytyPS5">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>WWE 2K26: Main menu</strong><br>
+      <img src="docs/screenshots/wwe2k26-menu.png" width="300" alt="WWE 2K26 main menu running in KytyPS5">
+    </td>
+    <td align="center">
+      <strong>WWE 2K26: Title screen</strong><br>
+      <img src="docs/screenshots/wwe2k26-title.png" width="300" alt="WWE 2K26 title screen running in KytyPS5">
+    </td>
+  </tr>
+</table>
+
+## Reduce stutter with shader pre-generation
+
+The first time a game uses a shader, the emulator has to compile it, and the game freezes briefly
+while it waits. This shows up as hitches in menus and when a match loads. In one measured second
+of an NHL 26 menu, compiling 53 pipelines and 66 shaders took over 1.2 seconds.
+
+**Pre-generate shaders** records every shader and pipeline a game compiles. On later launches, the
+emulator compiles all of them on several threads before the game starts, so they are ready
+when the game asks for them.
+
+To turn it on or off:
+
+1. Open the launcher and edit the game's settings.
+2. Go to **Performance & diagnostics**.
+3. Check or clear **Pre-generate shaders**, then select **Save**.
+
+It is on by default. The first run of a game still hitches while shaders are recorded. Later runs
+boot a little slower while the recorded shaders compile, then play with far fewer hitches. The
+records are kept in the `_PipelineCache` folder.
+
+## Recent emulation improvements
+
+### Rendering
+
+- **Black ice in NHL 26.** Packed `R11G11B10` colour clears are now decoded. The game clears a
+  lighting mask to 1.0, and the dropped clear left it at 0, which blacked out the rink.
+- **Missing HUD and pause menu.** The compositor UI mask workaround also covers the in-match
+  compositor, so the HUD is shown instead of drawn and discarded.
+- **Wrong G-buffer outputs.** Pixel shader exports are packed onto the slots enabled in
+  `CB_SHADER_MASK`, and colour writes to disabled slots are masked.
+- **Sparkles and noise on fast-cleared targets.** CMask fast-clear colour targets are cleared
+  instead of being filled with uninitialized guest memory.
+- **Exploding cloth and skinned meshes.** Formatted buffer stores (F16, UNORM/SNORM, scaled) are
+  encoded correctly instead of writing raw float32 bits, which produced half-float NaNs.
+- **Pixel derivatives.** DPP quad-permutation moves are emulated with fine derivatives.
+- **Crash when starting a match.** Stencil associations only reuse registered images, which fixes a
+  `PageManager` write-watcher overflow.
+- **Tessellated draws.** Patch draws are skipped unless **Tessellation** is enabled in the launcher,
+  because NHL 26's hull shaders use operands the decoder does not support yet.
+
+### Shader recompiler
+
+- Added `V_FRACT_F16`, `V_CMPX_LT_U16` and SOP1 opcode `0x21`, and fixed the destination handling
+  of `V_MIN_I32`.
+- **Per-pixel texture lookups.** Shaders that pick a texture from a material table using a
+  per-pixel value (NHL 26 reads it from G-buffer data) now compile. An unreadable table entry binds
+  a null texture instead of stopping the emulator.
+- Texture descriptors read from a buffer at a per-draw constant offset are now accepted, and
+  out-of-bounds constant buffer reads return zero, matching the generated shader.
+- Whole-value reads of the packed pixel ancillary input are rebuilt from the sample ID and layer.
+- Fixed control-flow structurization for shaders that early-return and for shared join blocks that
+  were misread as loop continues.
+- Bounded the compare-exchange retry loop used for sub-dword stores at 4096 retries, so a lost race
+  drops one store instead of hanging the GPU into `VK_ERROR_DEVICE_LOST`.
+- A shader loop guard is on by default for the NHL 26 shaders known to hang. Compute shader
+  `0873b3a2bce038b2`, which crashes the AMD pipeline compiler, is skipped by default. Both can be
+  changed in the launcher's **Performance & diagnostics** settings.
+
+### System libraries
+
+- **NHL 26 loading loop.** Implemented the HTTP, HTTPS, NP and resolver exports the game called in
+  an endless retry cycle, including `sceHttpGetLastErrno` and `sceHttpsGetSslError`. Before this,
+  unresolved stubs reported success and left the error outputs uninitialized.
+- **WWE 2K26 boot.** `AgcCreateShader` no longer relocates a shader header that is created twice.
+  Added `sceKernelGetModuleList2`, `sceKernelGetModuleInfo2` and `sceKernelAioWaitRequests`, and
+  stubbed unresolved AgcDriver, SharePlay and Pad imports.
+
+### Performance
+
+- **Shader pre-generation.** See [Reduce stutter with shader pre-generation](#reduce-stutter-with-shader-pre-generation).
+- **Persistent Vulkan pipeline cache.** The cache is kept across builds and saved every 128 new
+  pipelines, so a crash no longer loses it.
+- **Lower per-draw overhead.** Debug labels are only formatted when **GPU debug labels** or the
+  graphics debug dump is enabled.
+- **Fewer redundant resource walks.** Buffer upload checks are skipped while no buffer has changed
+  on the CPU, and resource materialization results are reused per shader.
+
+### Launcher and diagnostics
+
+- A new **Performance & diagnostics** settings page covers shader pre-generation, performance stats,
+  validation, debug dumps, tessellation and the NHL 26 workarounds. Extra environment variables can
+  be entered as `NAME=VALUE`, separated by `;`.
+- **Performance stats in console** prints per-second draws, dispatches, submits, compiles, readbacks
+  and time spent waiting on the GPU. Tracy captures include frame marks, plots and zones.
+- Shader failures now explain themselves: failed resource tracking writes the shader IR to
+  `shader_tracking_failure_<hash>.ir.txt`, and failed SRT walks and pipeline creation log the reason.
+- Offline shader analysis scripts live in [`tools/shader_analysis`](tools/shader_analysis):
+  `spv_loops.py` finds non-terminating loops, `spv_diff.py` compares two shader dumps and `nid.py`
+  identifies unresolved imports by NID.
+
+<sub>Claude and Codex were used for code review, reverse engineering and fixes.</sub>
+
+## Full project README
+
+<details>
+<summary><strong>Original KytyPS5 README</strong></summary>
+
+<br>
+
 KytyPS5 is a free and open-source PlayStation 5 emulator written in C++ for Windows and Linux,
 with experimental macOS support. It is based on a heavily modified version of
 [Kyty](https://github.com/InoriRus/Kyty). The project is in an early stage of development, so
@@ -347,3 +489,5 @@ licenses included with those components.
   of the original Kyty project.
 - [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) — reference for memory-model
   understanding and the AVPlayer implementation.
+
+</details>
