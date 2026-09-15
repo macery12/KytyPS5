@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>760</width>
-    <height>620</height>
+    <height>840</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -267,6 +267,173 @@
            <size><width>40</width><height>20</height></size>
           </property>
          </spacer>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item row="3" column="0" colspan="2">
+      <widget class="QGroupBox" name="diagnostics_group">
+       <property name="title">
+        <string>Performance &amp;&amp; diagnostics</string>
+       </property>
+       <layout class="QVBoxLayout" name="diagnosticsLayout">
+        <property name="spacing"><number>8</number></property>
+        <item>
+         <layout class="QGridLayout" name="diagnosticsSwitchesLayout" columnstretch="1,1,1">
+          <property name="horizontalSpacing"><number>8</number></property>
+          <property name="verticalSpacing"><number>6</number></property>
+          <item row="0" column="0">
+           <widget class="QCheckBox" name="checkBox_pre_gen">
+            <property name="toolTip"><string>--pre-gen: record the shaders and pipelines each run compiles, then compile the recorded ones before the game starts so later runs hitch less. Records are kept in _PipelineCache</string></property>
+            <property name="text"><string>Pre-generate shaders</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QCheckBox" name="checkBox_perf_stats">
+            <property name="toolTip"><string>KYTY_PERF_STATS=1: print a PerfStats line to the console once per second (FPS, draws, memory faults, readbacks, shader and pipeline compiles, GPU waits)</string></property>
+            <property name="text"><string>Performance stats in console</string></property>
+           </widget>
+          </item>
+          <item row="0" column="2">
+           <widget class="QCheckBox" name="checkBox_gpu_labels">
+            <property name="toolTip"><string>KYTY_GPU_LABELS=1: label every draw and dispatch for RenderDoc and GPU crash dumps. Slows busy scenes; graphics debug dump also enables labels</string></property>
+            <property name="text"><string>GPU debug labels</string></property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QCheckBox" name="checkBox_gpu_assisted_validation">
+            <property name="toolTip"><string>--gpu-assisted-validation: bounds-check shader resource accesses on the GPU. Implies Vulkan validation; very slow</string></property>
+            <property name="text"><string>GPU-assisted validation</string></property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QCheckBox" name="checkBox_graphics_debug_dump">
+            <property name="toolTip"><string>--graphics-debug-dump: write graphics debug dumps and name Vulkan objects. Slow</string></property>
+            <property name="text"><string>Graphics debug dump</string></property>
+           </widget>
+          </item>
+          <item row="1" column="2">
+           <widget class="QCheckBox" name="checkBox_spirv_debug_printf">
+            <property name="toolTip"><string>--spirv-debug-printf: enable debug printf output from translated shaders</string></property>
+            <property name="text"><string>SPIR-V debug printf</string></property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QCheckBox" name="checkBox_sync_compute">
+            <property name="toolTip"><string>KYTY_SYNC_COMPUTE=1: wait for every guest compute dispatch to finish. For diagnosing GPU stalls; very slow</string></property>
+            <property name="text"><string>Synchronous guest compute</string></property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QCheckBox" name="checkBox_tessellation">
+            <property name="toolTip"><string>KYTY_ENABLE_TESSELLATION=1: compile patch draws through the tessellation path instead of skipping them</string></property>
+            <property name="text"><string>Tessellation</string></property>
+           </widget>
+          </item>
+          <item row="2" column="2">
+           <widget class="QCheckBox" name="checkBox_trace_dcc">
+            <property name="toolTip"><string>KYTY_TRACE_DCC=1: log fast-clear metadata fills and decisions to the console</string></property>
+            <property name="text"><string>Trace fast-clear fills</string></property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QCheckBox" name="checkBox_force_ui_mask">
+            <property name="toolTip"><string>KYTY_FORCE_UI_MASK: force the NHL 26 compositor UI mask. On by default; unchecking sets the variable to 0</string></property>
+            <property name="text"><string>Force NHL 26 UI mask</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QCheckBox" name="checkBox_pixel_quad_derivatives">
+            <property name="toolTip"><string>KYTY_PIXEL_QUAD_DERIVATIVES: emulate pixel quad moves with fine derivatives. On by default; unchecking uses the old subgroup shuffle</string></property>
+            <property name="text"><string>Pixel quad derivatives</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="3" column="2">
+           <widget class="QCheckBox" name="checkBox_disable_cmask_clear">
+            <property name="toolTip"><string>KYTY_DISABLE_CMASK_CLEAR=1: upload CMask fast clears from guest memory instead of clearing on the host (for A/B tests)</string></property>
+            <property name="text"><string>Disable CMask clear</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QGridLayout" name="diagnosticsValuesLayout" columnstretch="0,1,0,1">
+          <property name="horizontalSpacing"><number>8</number></property>
+          <property name="verticalSpacing"><number>6</number></property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="label_loop_guard_hashes">
+            <property name="text"><string>Loop guard shaders:</string></property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="lineEdit_loop_guard_hashes">
+            <property name="toolTip"><string>KYTY_SHADER_LOOP_GUARD_HASHES: comma-separated shader hashes that get a loop iteration guard, or * for every shader. Empty uses the built-in list</string></property>
+            <property name="placeholderText"><string>Built-in list (* for all)</string></property>
+            <property name="clearButtonEnabled"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="0" column="2">
+           <widget class="QLabel" name="label_loop_limit">
+            <property name="text"><string>Loop guard limit:</string></property>
+           </widget>
+          </item>
+          <item row="0" column="3">
+           <widget class="QLineEdit" name="lineEdit_loop_limit">
+            <property name="toolTip"><string>KYTY_SHADER_LOOP_LIMIT: iteration budget of the shader loop guard. Empty uses 4096; 0 disables the guard</string></property>
+            <property name="placeholderText"><string>4096 (0 disables)</string></property>
+            <property name="clearButtonEnabled"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="label_skip_cs_hashes">
+            <property name="text"><string>Skip compute hashes:</string></property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QLineEdit" name="lineEdit_skip_cs_hashes">
+            <property name="toolTip"><string>KYTY_SKIP_CS_HASH: comma-separated guest compute shader hashes to skip (up to 16). Empty keeps the default 0x0873b3a2bce038b2; any other text replaces it, e.g. none to skip nothing</string></property>
+            <property name="placeholderText"><string>Default (none = skip nothing)</string></property>
+            <property name="clearButtonEnabled"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="1" column="2">
+           <widget class="QLabel" name="label_skip_cs_addresses">
+            <property name="text"><string>Skip compute addresses:</string></property>
+           </widget>
+          </item>
+          <item row="1" column="3">
+           <widget class="QLineEdit" name="lineEdit_skip_cs_addresses">
+            <property name="toolTip"><string>KYTY_SKIP_CS_ADDRESS: comma-separated guest compute shader addresses to skip (up to 16)</string></property>
+            <property name="clearButtonEnabled"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="label_trace_nan_cs">
+            <property name="text"><string>Trace NaN compute:</string></property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QLineEdit" name="lineEdit_trace_nan_cs">
+            <property name="toolTip"><string>KYTY_TRACE_NAN_CS: comma-separated compute shader hashes to check for NaN outputs, or * for all</string></property>
+            <property name="clearButtonEnabled"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="2" column="2">
+           <widget class="QLabel" name="label_extra_environment">
+            <property name="text"><string>Extra environment:</string></property>
+           </widget>
+          </item>
+          <item row="2" column="3">
+           <widget class="QLineEdit" name="lineEdit_extra_environment">
+            <property name="toolTip"><string>Other environment variables for the emulator, as NAME=VALUE entries separated by ;</string></property>
+            <property name="placeholderText"><string>NAME=VALUE; NAME2=VALUE</string></property>
+            <property name="clearButtonEnabled"><bool>true</bool></property>
+           </widget>
+          </item>
+         </layout>
         </item>
        </layout>
       </widget>

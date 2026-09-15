@@ -231,6 +231,25 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->lineEdit_printf_file->setEnabled(info.printf_direction ==
 	                                       Configuration::LogDirection::File);
 	m_ui->checkBox_profiler->setChecked(info.profiler_enabled);
+
+	m_ui->checkBox_pre_gen->setChecked(info.pre_gen_enabled);
+	m_ui->checkBox_gpu_assisted_validation->setChecked(info.gpu_assisted_validation_enabled);
+	m_ui->checkBox_graphics_debug_dump->setChecked(info.graphics_debug_dump_enabled);
+	m_ui->checkBox_spirv_debug_printf->setChecked(info.spirv_debug_printf_enabled);
+	m_ui->checkBox_perf_stats->setChecked(info.perf_stats_enabled);
+	m_ui->checkBox_gpu_labels->setChecked(info.gpu_labels_enabled);
+	m_ui->checkBox_sync_compute->setChecked(info.sync_compute_enabled);
+	m_ui->checkBox_tessellation->setChecked(info.tessellation_enabled);
+	m_ui->checkBox_force_ui_mask->setChecked(info.force_ui_mask_enabled);
+	m_ui->checkBox_pixel_quad_derivatives->setChecked(info.pixel_quad_derivatives_enabled);
+	m_ui->checkBox_trace_dcc->setChecked(info.trace_dcc_enabled);
+	m_ui->checkBox_disable_cmask_clear->setChecked(info.cmask_clear_disabled);
+	m_ui->lineEdit_loop_guard_hashes->setText(info.shader_loop_guard_hashes);
+	m_ui->lineEdit_loop_limit->setText(info.shader_loop_limit);
+	m_ui->lineEdit_skip_cs_hashes->setText(info.skip_cs_hashes);
+	m_ui->lineEdit_skip_cs_addresses->setText(info.skip_cs_addresses);
+	m_ui->lineEdit_trace_nan_cs->setText(info.trace_nan_cs);
+	m_ui->lineEdit_extra_environment->setText(info.extra_environment);
 }
 
 void ConfigurationEditDialog::InitGameDirectories() {
@@ -366,6 +385,25 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui) {
 	    TextToEnum<Configuration::LogDirection>(ui.comboBox_printf_direction->currentText());
 	info.printf_output_file = ui.lineEdit_printf_file->text();
 	info.profiler_enabled = ui.checkBox_profiler->isChecked();
+
+	info.pre_gen_enabled                 = ui.checkBox_pre_gen->isChecked();
+	info.gpu_assisted_validation_enabled = ui.checkBox_gpu_assisted_validation->isChecked();
+	info.graphics_debug_dump_enabled     = ui.checkBox_graphics_debug_dump->isChecked();
+	info.spirv_debug_printf_enabled      = ui.checkBox_spirv_debug_printf->isChecked();
+	info.perf_stats_enabled              = ui.checkBox_perf_stats->isChecked();
+	info.gpu_labels_enabled              = ui.checkBox_gpu_labels->isChecked();
+	info.sync_compute_enabled            = ui.checkBox_sync_compute->isChecked();
+	info.tessellation_enabled            = ui.checkBox_tessellation->isChecked();
+	info.force_ui_mask_enabled           = ui.checkBox_force_ui_mask->isChecked();
+	info.pixel_quad_derivatives_enabled  = ui.checkBox_pixel_quad_derivatives->isChecked();
+	info.trace_dcc_enabled               = ui.checkBox_trace_dcc->isChecked();
+	info.cmask_clear_disabled            = ui.checkBox_disable_cmask_clear->isChecked();
+	info.shader_loop_guard_hashes        = ui.lineEdit_loop_guard_hashes->text().trimmed();
+	info.shader_loop_limit               = ui.lineEdit_loop_limit->text().trimmed();
+	info.skip_cs_hashes                  = ui.lineEdit_skip_cs_hashes->text().trimmed();
+	info.skip_cs_addresses               = ui.lineEdit_skip_cs_addresses->text().trimmed();
+	info.trace_nan_cs                    = ui.lineEdit_trace_nan_cs->text().trimmed();
+	info.extra_environment               = ui.lineEdit_extra_environment->text().trimmed();
 }
 
 void ConfigurationEditDialog::update_info() {
@@ -392,6 +430,15 @@ void ConfigurationEditDialog::save() {
 	if (!Config::IsConfiguredUserIdValid(m_ui->spinBox_user_id->value())) {
 		QMessageBox::critical(this, tr("Save failed"),
 		                      tr("User ID cannot be 254 (everyone) or 255 (system)"));
+		return;
+	}
+	QString invalid_environment;
+	if (!Configuration::ParseEnvironment(m_ui->lineEdit_extra_environment->text(), nullptr,
+	                                     &invalid_environment)) {
+		QMessageBox::critical(
+		    this, tr("Save failed"),
+		    tr("Invalid extra environment entry: %1\nUse NAME=VALUE entries separated by ';'")
+		        .arg(invalid_environment));
 		return;
 	}
 
