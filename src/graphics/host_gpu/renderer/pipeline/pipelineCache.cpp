@@ -117,23 +117,43 @@ bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
 }
 
-// Records each word the resource specialization reads, so shader warm-up can serve it back.
+// Recording readers store each word the resource specialization reads in the
+// PipelineRecord::Program passed as userdata, so shader warm-up can serve it back.
 bool RecordShaderGuestMemory(void* userdata, uint64_t address, uint32_t* value) {
 	const bool valid = ReadShaderGuestMemory(nullptr, address, value);
-	static_cast<std::vector<PipelineRecord::MemoryRead>*>(userdata)->push_back(
+	static_cast<PipelineRecord::Program*>(userdata)->reads.push_back(
 	    {.address = address, .value = valid ? *value : 0u, .valid = valid ? 1u : 0u});
 	return valid;
 }
 
-// Serves recorded words to the resource specialization during shader warm-up.
-bool ReplayShaderGuestMemory(void* userdata, uint64_t address, uint32_t* value) {
-	const auto& reads = *static_cast<const std::vector<PipelineRecord::MemoryRead>*>(userdata);
-	const auto  read  = std::ranges::find(reads, address, &PipelineRecord::MemoryRead::address);
+bool RecordShaderGuestMemoryRaw(void* userdata, uint64_t address, uint32_t* value) {
+	// Without a reader the SRT walker copies the word straight from guest memory; do the same.
+	std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+	static_cast<PipelineRecord::Program*>(userdata)->raw_reads.push_back(
+	    {.address = address, .value = *value, .valid = 1u});
+	return true;
+}
+
+// Replay readers serve recorded words during shader warm-up. The game is not loaded then, so a word
+// that was not recorded fails the read; it must never fall back to guest memory.
+bool FindRecordedRead(const std::vector<PipelineRecord::MemoryRead>& reads, uint64_t address,
+                      uint32_t* value) {
+	const auto read = std::ranges::find(reads, address, &PipelineRecord::MemoryRead::address);
 	if (value == nullptr || read == reads.end() || read->valid == 0) {
 		return false;
 	}
 	*value = read->value;
 	return true;
+}
+
+bool ReplayShaderGuestMemory(void* userdata, uint64_t address, uint32_t* value) {
+	const auto* program = static_cast<const PipelineRecord::Program*>(userdata);
+	return FindRecordedRead(program->reads, address, value);
+}
+
+bool ReplayShaderGuestMemoryRaw(void* userdata, uint64_t address, uint32_t* value) {
+	const auto* program = static_cast<const PipelineRecord::Program*>(userdata);
+	return FindRecordedRead(program->raw_reads, address, value);
 }
 
 // Runs job(0) .. job(count - 1) on up to 32 hardware threads, including the calling thread.
@@ -488,11 +508,12 @@ struct PipelineCache::ProgramCache {
 		program.code.assign(params.code.begin(), params.code.end());
 		program.back_code.assign(params.back_code.begin(), params.back_code.end());
 		program.user_data = params.user_data;
-		// Derive the specialization again through a recording reader, so replay reads the same words.
+		// Derive the specialization again through recording readers, so replay reads the same words.
 		const ShaderRecompiler::IR::SrtRuntime runtime {
 			.user_data                  = params.user_data,
 			.shader_base                = params.Base(),
-			.userdata                   = &program.reads,
+			.read_memory                = RecordShaderGuestMemoryRaw,
+			.userdata                   = &program,
 			.read_specialization_memory = RecordShaderGuestMemory,
 		};
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
@@ -555,7 +576,8 @@ struct PipelineCache::ProgramCache {
 		const ShaderRecompiler::IR::SrtRuntime runtime {
 			.user_data                  = params.user_data,
 			.shader_base                = params.Base(),
-			.userdata                   = const_cast<void*>(static_cast<const void*>(&recorded.reads)),
+			.read_memory                = ReplayShaderGuestMemoryRaw,
+			.userdata                   = const_cast<void*>(static_cast<const void*>(&recorded)),
 			.read_specialization_memory = ReplayShaderGuestMemory,
 		};
 		ShaderRecompiler::IR::ResourceSnapshot       resources;

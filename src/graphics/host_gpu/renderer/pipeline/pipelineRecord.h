@@ -32,8 +32,11 @@ struct Program {
 	std::vector<uint32_t> code;
 	std::vector<uint32_t> back_code;
 	std::vector<uint32_t> user_data;
-	// Guest words read while deriving the resource specialization, so replay derives the same one.
+	// Guest words read while deriving the resource specialization, so replay derives the same one:
+	// `reads` come through the clean specialization reader, `raw_reads` straight from guest memory
+	// (SrtRuntime::read_memory). Warm-up runs before the game is loaded, so both must be recorded.
 	std::vector<MemoryRead> reads;
+	std::vector<MemoryRead> raw_reads;
 	// Only the member matching `stage` is recorded.
 	ShaderVertexInputInfo  vertex;
 	ShaderPixelInputInfo   pixel;

@@ -15,7 +15,7 @@ namespace {
 
 constexpr uint32_t FileMagic = 0x5250594bu; // "KYPR"
 // Bump whenever a recorded structure or one of the visitors below changes.
-constexpr uint32_t FileVersion = 1;
+constexpr uint32_t FileVersion = 2;
 constexpr uint64_t HeaderSize  = 2 * sizeof(uint32_t);
 constexpr uint64_t FrameSize   = 2 * sizeof(uint32_t) + sizeof(uint64_t);
 constexpr uint64_t MaxFileSize = 1024ull * 1024ull * 1024ull;
@@ -170,6 +170,7 @@ bool VisitProgram(Archive& archive, Record& program) {
 	archive.Array(program.back_code);
 	archive.Array(program.user_data);
 	archive.Array(program.reads);
+	archive.Array(program.raw_reads);
 	switch (program.stage) {
 		case ShaderType::Vertex: VisitVertex(archive, program.vertex); return true;
 		case ShaderType::Pixel: VisitPixel(archive, program.pixel); return true;
