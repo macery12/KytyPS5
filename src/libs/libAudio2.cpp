@@ -86,6 +86,14 @@ struct AudioOut2SystemState {
 	uint64_t reserved[7];
 };
 
+struct AudioOut2UserSupportedAttributes {
+	uint32_t flags;
+	uint32_t reserved;
+	uint32_t output_type;
+};
+
+static_assert(sizeof(AudioOut2UserSupportedAttributes) == 12);
+
 struct AudioOut2SpeakerAngle {
 	int16_t azimuth;
 	int16_t elevation;
@@ -731,6 +739,19 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, AudioOut2UserHandle* han
 int KYTY_SYSV_ABI AudioOut2UserDestroy(AudioOut2UserHandle handle) {
 	PRINT_NAME();
 	LOGF("\t handle = 0x%016" PRIx64 "\n", static_cast<uint64_t>(handle));
+	return OK;
+}
+
+int KYTY_SYSV_ABI AudioOut2UserGetSupportedAttributes(
+    AudioOut2UserHandle handle, AudioOut2UserSupportedAttributes* attributes) {
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(attributes == nullptr);
+
+	// The host backend does not expose PS5 controller audio or 3D-user capabilities. Return a
+	// deterministic unsupported state instead of leaving the guest's output buffer uninitialized.
+	std::memset(attributes, 0, sizeof(AudioOut2UserSupportedAttributes));
+	LOGF("\t handle = 0x%016" PRIx64 "\n", static_cast<uint64_t>(handle));
+
 	return OK;
 }
 

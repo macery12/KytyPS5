@@ -33,7 +33,17 @@ struct ComputeShaderInfo;
 struct ShaderRegisters;
 } // namespace HW
 
-enum class ShaderType { Unknown, Vertex, Pixel, Fetch, Compute, Mesh };
+enum class ShaderType {
+	Unknown,
+	Vertex,
+	Pixel,
+	Fetch,
+	Compute,
+	Mesh,
+	Local,
+	TessellationControl,
+	TessellationEvaluation
+};
 
 namespace ShaderRecompiler::IR {
 struct CompiledShaderInfo;
@@ -99,6 +109,16 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	}
 };
 
+struct ShaderTessellationInputInfo {
+	uint32_t input_control_points  = 0;
+	uint32_t output_control_points = 0;
+	uint32_t ls_stride             = 0;
+	uint32_t hs_stride             = 0;
+	uint32_t domain                = 0;
+	uint32_t partitioning          = 0;
+	uint32_t output_topology       = 0;
+};
+
 struct ShaderVertexInputInfo {
 	static constexpr int RES_MAX = 32;
 
@@ -106,6 +126,7 @@ struct ShaderVertexInputInfo {
 	ShaderVertexDestination resources_dst[RES_MAX];
 	ShaderVertexInputBuffer buffers[RES_MAX];
 	ShaderStageRuntime      stage;
+	ShaderType                  logical_stage        = ShaderType::Vertex;
 	int                     resources_num       = 0;
 	int                     fetch_attrib_reg    = 0;
 	int                     fetch_buffer_reg    = 0;
@@ -114,6 +135,7 @@ struct ShaderVertexInputInfo {
 	uint32_t                pa_cl_vs_out_cntl    = 0;
 	ShaderClipSpaceTransform clip_space;
 	ShaderMeshInputInfo      mesh;
+	ShaderTessellationInputInfo tess;
 	bool                    fetch_external      = false;
 	bool                    fetch_embedded      = false;
 };
@@ -131,10 +153,16 @@ struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 struct ShaderPixelInputInfo {
 	uint32_t                                       interpolator_settings[32]    = {0};
 	uint32_t                                       input_num                    = 0;
+	uint32_t                                       wave_size                    = 64;
 	uint32_t                                       ps_system_input_base         = 0;
 	uint32_t                                       custom_interpolation_mask    = 0;
 	uint32_t                                       ps_perspective_center_vgpr   = UINT32_MAX;
+	uint32_t                                       ps_perspective_centroid_vgpr = UINT32_MAX;
 	uint8_t                                        target_output_mode[8]        = {};
+	// Guest MRT slot (SPIR-V output location) fed by each MRT export index. The hardware
+	// packs exports onto the slots enabled in CB_SHADER_MASK, in slot order.
+	uint8_t                                        target_export_location[8]    = {0, 1, 2, 3,
+	                                                                               4, 5, 6, 7};
 	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping        = {};
 	uint32_t                                       scratch_size_dwords          = 0;
 	bool                                           ps_pos_x                     = false;
@@ -150,6 +178,7 @@ struct ShaderPixelInputInfo {
 	bool                                           ps_sample_shading            = false;
 	bool                                           ps_early_z                   = false;
 	bool                                           ps_execute_on_noop           = false;
+	bool                                           ps_dual_source_blend         = false;
 	ShaderStageRuntime                             stage;
 
 	bool HasPositionInput() const { return ps_pos_x || ps_pos_y || ps_pos_z || ps_pos_w; }

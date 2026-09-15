@@ -3,6 +3,7 @@
 #include "common/emulatorConfig.h"
 #include "configuration.h"
 #include "mandatoryLineEdit.h"
+#include "SDL.h"
 
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -110,9 +111,9 @@ ConfigurationEditDialog::ConfigurationEditDialog(Configuration& info, QWidget* p
 	connect(m_ui->clear_button, &QPushButton::clicked, this, &ConfigurationEditDialog::clear);
 	connect(m_ui->comboBox_shader_log_direction, &QComboBox::currentTextChanged, this,
 	        [this](const QString& text) {
-		        auto log = TextToEnum<Configuration::ShaderLogDirection>(text);
+		        auto log = TextToEnum<Configuration::LogDirection>(text);
 		        m_ui->lineEdit_shader_log_folder->setEnabled(
-		            log == Configuration::ShaderLogDirection::File);
+		            log == Configuration::LogDirection::File);
 	        });
 	connect(m_ui->checkBox_cmd_dump, &QCheckBox::toggled, this,
 	        [this](bool flag) { m_ui->lineEdit_cmd_dump_folder->setEnabled(flag); });
@@ -167,6 +168,31 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->lineEdit_user_name->setMaxLength(static_cast<int>(Config::MAX_USER_NAME_LENGTH));
 	m_ui->lineEdit_user_name->setText(info.user_name);
 	m_ui->spinBox_user_id->setValue(info.user_id);
+	auto* microphone = m_ui->comboBox_audio_input_device;
+	microphone->clear();
+	microphone->addItem(tr("None"), QString {});
+	microphone->setToolTip(tr("Microphone used by games. None supplies silence."));
+	SDL_SetMainReady();
+	if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
+		const int device_count = SDL_GetNumAudioDevices(SDL_TRUE);
+		for (int i = 0; i < device_count; i++) {
+			if (const auto* device = SDL_GetAudioDeviceName(i, SDL_TRUE); device != nullptr) {
+				const auto name = QString::fromUtf8(device);
+				if (microphone->findData(name) < 0) {
+					microphone->addItem(name, name);
+				}
+			}
+		}
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
+	} else {
+		microphone->setToolTip(tr("Microphones could not be listed: %1")
+		                           .arg(QString::fromUtf8(SDL_GetError())));
+	}
+	if (microphone->findData(info.audio_input_device) < 0) {
+		microphone->addItem(tr("%1 (unavailable)").arg(info.audio_input_device),
+		                    info.audio_input_device);
+	}
+	microphone->setCurrentIndex(microphone->findData(info.audio_input_device));
 	ListInit(m_ui->comboBox_screen_resolution, info.screen_resolution);
 	ListInit(m_ui->comboBox_present_mode, info.present_mode);
 	m_ui->comboBox_gpu->clear();
@@ -222,7 +248,7 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	ListInit(m_ui->comboBox_shader_log_direction, info.shader_log_direction);
 	m_ui->lineEdit_shader_log_folder->setText(info.shader_log_folder);
 	m_ui->lineEdit_shader_log_folder->setEnabled(info.shader_log_direction ==
-	                                             Configuration::ShaderLogDirection::File);
+	                                             Configuration::LogDirection::File);
 	m_ui->checkBox_cmd_dump->setChecked(info.command_buffer_dump_enabled);
 	m_ui->lineEdit_cmd_dump_folder->setText(info.command_buffer_dump_folder);
 	m_ui->lineEdit_cmd_dump_folder->setEnabled(info.command_buffer_dump_enabled);
@@ -230,7 +256,26 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->lineEdit_printf_file->setText(info.printf_output_file);
 	m_ui->lineEdit_printf_file->setEnabled(info.printf_direction ==
 	                                       Configuration::LogDirection::File);
-	ListInit(m_ui->comboBox_profiler_direction, info.profiler_direction);
+	m_ui->checkBox_profiler->setChecked(info.profiler_enabled);
+
+	m_ui->checkBox_pre_gen->setChecked(info.pre_gen_enabled);
+	m_ui->checkBox_gpu_assisted_validation->setChecked(info.gpu_assisted_validation_enabled);
+	m_ui->checkBox_graphics_debug_dump->setChecked(info.graphics_debug_dump_enabled);
+	m_ui->checkBox_spirv_debug_printf->setChecked(info.spirv_debug_printf_enabled);
+	m_ui->checkBox_perf_stats->setChecked(info.perf_stats_enabled);
+	m_ui->checkBox_gpu_labels->setChecked(info.gpu_labels_enabled);
+	m_ui->checkBox_sync_compute->setChecked(info.sync_compute_enabled);
+	m_ui->checkBox_tessellation->setChecked(info.tessellation_enabled);
+	m_ui->checkBox_force_ui_mask->setChecked(info.force_ui_mask_enabled);
+	m_ui->checkBox_pixel_quad_derivatives->setChecked(info.pixel_quad_derivatives_enabled);
+	m_ui->checkBox_trace_dcc->setChecked(info.trace_dcc_enabled);
+	m_ui->checkBox_disable_cmask_clear->setChecked(info.cmask_clear_disabled);
+	m_ui->lineEdit_loop_guard_hashes->setText(info.shader_loop_guard_hashes);
+	m_ui->lineEdit_loop_limit->setText(info.shader_loop_limit);
+	m_ui->lineEdit_skip_cs_hashes->setText(info.skip_cs_hashes);
+	m_ui->lineEdit_skip_cs_addresses->setText(info.skip_cs_addresses);
+	m_ui->lineEdit_trace_nan_cs->setText(info.trace_nan_cs);
+	m_ui->lineEdit_extra_environment->setText(info.extra_environment);
 }
 
 void ConfigurationEditDialog::InitGameDirectories() {
@@ -340,6 +385,7 @@ void ConfigurationEditDialog::resizeEvent(QResizeEvent* event) {
 static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui) {
 	info.user_name = ui.lineEdit_user_name->text().trimmed();
 	info.user_id   = ui.spinBox_user_id->value();
+	info.audio_input_device = ui.comboBox_audio_input_device->currentData().toString();
 	info.screen_resolution =
 	    TextToEnum<Configuration::Resolution>(ui.comboBox_screen_resolution->currentText());
 	info.present_mode =
@@ -357,7 +403,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui) {
 #endif
 	info.shader_optimization_type = TextToEnum<Configuration::ShaderOptimizationType>(
 	    ui.comboBox_shader_optimization_type->currentText());
-	info.shader_log_direction = TextToEnum<Configuration::ShaderLogDirection>(
+	info.shader_log_direction = TextToEnum<Configuration::LogDirection>(
 	    ui.comboBox_shader_log_direction->currentText());
 	info.shader_log_folder           = ui.lineEdit_shader_log_folder->text();
 	info.command_buffer_dump_enabled = ui.checkBox_cmd_dump->isChecked();
@@ -365,8 +411,26 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui) {
 	info.printf_direction =
 	    TextToEnum<Configuration::LogDirection>(ui.comboBox_printf_direction->currentText());
 	info.printf_output_file = ui.lineEdit_printf_file->text();
-	info.profiler_direction =
-	    TextToEnum<Configuration::ProfilerDirection>(ui.comboBox_profiler_direction->currentText());
+	info.profiler_enabled = ui.checkBox_profiler->isChecked();
+
+	info.pre_gen_enabled                 = ui.checkBox_pre_gen->isChecked();
+	info.gpu_assisted_validation_enabled = ui.checkBox_gpu_assisted_validation->isChecked();
+	info.graphics_debug_dump_enabled     = ui.checkBox_graphics_debug_dump->isChecked();
+	info.spirv_debug_printf_enabled      = ui.checkBox_spirv_debug_printf->isChecked();
+	info.perf_stats_enabled              = ui.checkBox_perf_stats->isChecked();
+	info.gpu_labels_enabled              = ui.checkBox_gpu_labels->isChecked();
+	info.sync_compute_enabled            = ui.checkBox_sync_compute->isChecked();
+	info.tessellation_enabled            = ui.checkBox_tessellation->isChecked();
+	info.force_ui_mask_enabled           = ui.checkBox_force_ui_mask->isChecked();
+	info.pixel_quad_derivatives_enabled  = ui.checkBox_pixel_quad_derivatives->isChecked();
+	info.trace_dcc_enabled               = ui.checkBox_trace_dcc->isChecked();
+	info.cmask_clear_disabled            = ui.checkBox_disable_cmask_clear->isChecked();
+	info.shader_loop_guard_hashes        = ui.lineEdit_loop_guard_hashes->text().trimmed();
+	info.shader_loop_limit               = ui.lineEdit_loop_limit->text().trimmed();
+	info.skip_cs_hashes                  = ui.lineEdit_skip_cs_hashes->text().trimmed();
+	info.skip_cs_addresses               = ui.lineEdit_skip_cs_addresses->text().trimmed();
+	info.trace_nan_cs                    = ui.lineEdit_trace_nan_cs->text().trimmed();
+	info.extra_environment               = ui.lineEdit_extra_environment->text().trimmed();
 }
 
 void ConfigurationEditDialog::update_info() {
@@ -393,6 +457,15 @@ void ConfigurationEditDialog::save() {
 	if (!Config::IsConfiguredUserIdValid(m_ui->spinBox_user_id->value())) {
 		QMessageBox::critical(this, tr("Save failed"),
 		                      tr("User ID cannot be 254 (everyone) or 255 (system)"));
+		return;
+	}
+	QString invalid_environment;
+	if (!Configuration::ParseEnvironment(m_ui->lineEdit_extra_environment->text(), nullptr,
+	                                     &invalid_environment)) {
+		QMessageBox::critical(
+		    this, tr("Save failed"),
+		    tr("Invalid extra environment entry: %1\nUse NAME=VALUE entries separated by ';'")
+		        .arg(invalid_environment));
 		return;
 	}
 

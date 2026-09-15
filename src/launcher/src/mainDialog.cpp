@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
@@ -228,6 +229,9 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--screen-height" << r.at(1);
 	args << "--user-name" << info.user_name;
 	args << "--user-id" << QString::number(info.user_id);
+	if (!info.audio_input_device.isEmpty()) {
+		args << "--mic" << info.audio_input_device;
+	}
 	args << "--present-mode" << EnumToText(info.present_mode);
 	if (info.gpu_index >= 0) {
 		args << "--gpu" << QString::number(info.gpu_index);
@@ -239,7 +243,9 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--vblank-frequency" << QString::number(info.vblank_frequency);
 	args << "--console-language" << QString::number(info.console_language);
 	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
+	args << "--gpu-assisted-validation" << BoolArg(info.gpu_assisted_validation_enabled);
 	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
+	args << "--pre-gen" << BoolArg(info.pre_gen_enabled);
 	args << "--shader-optimization-type" << EnumToText(info.shader_optimization_type);
 	args << "--shader-log-direction" << EnumToText(info.shader_log_direction);
 	args << "--shader-log-folder" << info.shader_log_folder;
@@ -247,8 +253,11 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--command-buffer-dump-folder" << info.command_buffer_dump_folder;
 	args << "--printf-direction" << EnumToText(info.printf_direction);
 	args << "--printf-output-file" << info.printf_output_file;
-	args << "--profiler-direction" << EnumToText(info.profiler_direction);
-	args << "--spirv-debug-printf" << "false";
+	args << "--graphics-debug-dump" << BoolArg(info.graphics_debug_dump_enabled);
+	if (info.profiler_enabled) {
+		args << "--profile";
+	}
+	args << "--spirv-debug-printf" << BoolArg(info.spirv_debug_printf_enabled);
 #if defined(_WIN32)
 	if (info.red_zone_protection_enabled) {
 		args << "--redzone";
@@ -282,12 +291,22 @@ static QString BashQuote(QString value) {
 }
 
 static bool CreateBashScript(const QString& interpreter, const QStringList& args,
+                             const QList<Configuration::EnvironmentVariable>& environment,
                              const QString& file_name) {
 	QFile file(file_name);
 	if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
 		QTextStream s(&file);
 
 		s << "#!/bin/bash\n";
+		// Some terminals start commands from a server process that does not inherit the launcher's
+		// environment, so the script sets the variables itself.
+		for (const auto& variable: environment) {
+			if (variable.set) {
+				s << "export " << variable.name << "=" << BashQuote(variable.value) << "\n";
+			} else {
+				s << "unset " << variable.name << "\n";
+			}
+		}
 		s << BashQuote(interpreter);
 		for (const auto& arg: args) {
 			s << " " << BashQuote(arg);
@@ -393,10 +412,11 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 		QApplication::quit();
 		return;
 	}
+	const auto environment = info.EmulatorEnvironment();
 
 #ifdef __linux__
 	auto bash_file_name = dir.filePath(KYTY_BASH_FILE);
-	if (!CreateBashScript(interpreter, args, bash_file_name)) {
+	if (!CreateBashScript(interpreter, args, environment, bash_file_name)) {
 		QMessageBox::critical(this, tr("Error"), tr("Can't create file:\n") + bash_file_name);
 		QApplication::quit();
 		return;
@@ -427,6 +447,16 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 	process->setProgram(interpreter);
 	process->setArguments(args);
 #endif
+	// cmd.exe and the emulator it starts inherit this environment.
+	auto process_environment = QProcessEnvironment::systemEnvironment();
+	for (const auto& variable: environment) {
+		if (variable.set) {
+			process_environment.insert(variable.name, variable.value);
+		} else {
+			process_environment.remove(variable.name);
+		}
+	}
+	process->setProcessEnvironment(process_environment);
 	process->setWorkingDirectory(dir.path());
 #if defined(_WIN32)
 	process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {

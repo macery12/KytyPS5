@@ -18,9 +18,12 @@ struct ShaderParams {
 	std::vector<uint32_t>     user_data;
 	uint64_t                  hash = 0;
 	std::span<const uint32_t> back_code;
+	// Guest address of `code`. Shader warm-up replays recorded code from host memory and sets the
+	// original address here; otherwise the span itself is the guest mapping.
+	uint64_t                  base = 0;
 
 	[[nodiscard]] uint64_t Base() const {
-		return reinterpret_cast<uint64_t>(code.data());
+		return base != 0 ? base : reinterpret_cast<uint64_t>(code.data());
 	}
 };
 
@@ -30,6 +33,9 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& input_info, std::vector<u
 
 ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context& context,
                             const HW::UserConfig& user_config, ShaderVertexInputInfo& input_info);
+std::array<ShaderParams, 3>
+PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context& context,
+                            std::array<ShaderVertexInputInfo, 3>& input_info);
 ShaderParams PrepareProgram(
     const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,

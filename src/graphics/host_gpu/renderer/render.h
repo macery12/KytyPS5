@@ -109,6 +109,8 @@ public:
 
 	void SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0 = 0, uint32_t arg1 = 0,
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
+	// Remembers guest shader hashes recorded into this buffer so a device loss can name them.
+	void NoteDebugShader(uint64_t hash) noexcept;
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
 
@@ -140,6 +142,8 @@ private:
 	uint32_t            m_debug_arg2      = 0;
 	uint32_t            m_debug_arg3      = 0;
 	uint64_t            m_debug_arg4      = 0;
+	std::array<uint64_t, 8> m_debug_shaders {};
+	uint32_t                m_debug_shader_count = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
 	HW::Context*        m_registers   = nullptr;
@@ -170,15 +174,14 @@ private:
 	void DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args);
 
 	struct GraphicsBindings {
-		PreparedBindings                vertex;
+		std::array<PreparedBindings, 3> vertex;
 		std::optional<PreparedBindings> pixel;
 	};
 
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value);
-	[[nodiscard]] GraphicsBindings PrepareGraphicsBindings(const ShaderStageRuntime& vertex,
-	                                                       const ShaderStageRuntime& pixel,
-	                                                       bool                      pixel_active);
+	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
+	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);
@@ -187,12 +190,11 @@ private:
 	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer,
 	                                          const DrawCallInfo& draw,
 	                                          uint32_t            render_target_slice_offset,
-	                                          bool log_setup_phases, DrawRenderState& state);
+	                                          DrawRenderState& state);
 	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
 	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-	                         bool primitive_restart_enable, bool log_pipeline_phase,
-	                         bool set_bind_debug, bool set_auto_debug);
+	                         bool primitive_restart_enable);
 	[[nodiscard]] RenderState AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
 	                                               uint32_t color_count, RenderDepthInfo& depth,
 	                                               const std::optional<PreparedBindings>& pixel = std::nullopt);
@@ -200,7 +202,6 @@ private:
 	                                              uint32_t render_target_slice_offset);
 	void                      BindImage(ImageId id, bool storage);
 	void                      BindRenderTarget(ImageId id);
-	void                      TrackImageBinding(ImageId id);
 	void                      ResetBindings();
 	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
 	                                                     const CommandBuffer&          buffer);

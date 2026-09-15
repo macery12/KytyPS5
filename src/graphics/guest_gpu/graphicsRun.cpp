@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/perfStats.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -24,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -77,7 +79,7 @@ private:
 
 static bool GraphicsRunDebugDumpEnabled() {
 	return Config::GraphicsDebugDumpEnabled() &&
-	       Config::GetPrintfDirection() != Config::OutputDirection::Silent;
+	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
 }
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
@@ -147,6 +149,8 @@ void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 		command();
 		return;
 	}
+	KYTY_PROFILER_FUNCTION();
+	PerfStats::ScopedDuration wait_time(PerfStats::Duration::SyncCommand);
 	std::binary_semaphore done {0};
 	SendCommand([operation = std::move(command), &done]() mutable {
 		operation();
@@ -427,7 +431,7 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 	if (!decode_gds(dst_sel, dst_gds)) {
 		EXIT("unsupported dmaData destination selector 0x%02" PRIx8 "\n", dst_sel);
 	}
-	auto& buffer_cache = GetGpuResources().GetBufferCache();
+	auto& buffer_cache = m_renderer.GetBufferCache();
 	if (src_sel == 2) {
 		buffer_cache.FillBuffer(
 		    dst_address_or_offset, num_bytes,
@@ -603,11 +607,11 @@ bool GuestGpu::Process(Submission& submission) {
 			}
 			if (progressed) {
 				if (complete) {
-					m_renderer.GetGpuResources().RunGarbageCollector();
+					m_renderer.RunGarbageCollector();
 				}
 				cp.BufferFlush();
 			} else if (complete) {
-				m_renderer.GetGpuResources().RunGarbageCollector();
+				m_renderer.RunGarbageCollector();
 			}
 			break;
 		}
@@ -629,16 +633,16 @@ bool GuestGpu::Process(Submission& submission) {
 			           Pm4ProcessResult::Complete;
 			if (submission.command_execution.MadeProgress()) {
 				if (complete) {
-					m_renderer.GetGpuResources().RunGarbageCollector();
+					m_renderer.RunGarbageCollector();
 				}
 				cp.BufferFlush();
 			} else if (complete) {
-				m_renderer.GetGpuResources().RunGarbageCollector();
+				m_renderer.RunGarbageCollector();
 			}
 			break;
 		}
 		case SubmissionType::FlipPreparation:
-			m_renderer.GetGpuResources().RunGarbageCollector();
+			m_renderer.RunGarbageCollector();
 			cp.PrepareCpuFlip(submission.flip_request_id);
 			break;
 	}
@@ -672,20 +676,16 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 		Pm4Execution*     previous_execution;
 	} execution_scope(*this, execution);
 
-	ProcessPm4(execution, 0);
+	ProcessPm4(execution);
 	return execution.m_buffer_stack.empty() ? Pm4ProcessResult::Complete
 	                                        : Pm4ProcessResult::Blocked;
 }
 
-void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands) {
+void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain) {
 	EXIT_IF(g_current_execution == nullptr);
-	if (commands.empty()) {
-		return;
-	}
-	auto&      execution  = *g_current_execution;
-	const auto stop_depth = execution.m_buffer_stack.size();
-	execution.m_buffer_stack.push_back({commands});
-	ProcessPm4(execution, stop_depth);
+	EXIT_IF(!g_current_execution->m_next_buffer.empty());
+	g_current_execution->m_next_buffer = commands;
+	g_current_execution->m_chain       = chain;
 }
 
 void CommandProcessor::SuspendPm4() {
@@ -693,21 +693,13 @@ void CommandProcessor::SuspendPm4() {
 	g_current_execution->m_suspended = true;
 }
 
-void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
-	while (execution.m_buffer_stack.size() > stop_depth) {
+void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
+	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
-		const auto buffer_index = execution.m_buffer_stack.size() - 1;
-		auto&      cursor       = execution.m_buffer_stack[buffer_index];
+		auto& cursor = execution.m_buffer_stack.back();
 		EXIT_IF(cursor.offset_dw > cursor.commands.size());
-		if (cursor.deferred_advance_dw != 0) {
-			EXIT_IF(cursor.deferred_advance_dw > cursor.commands.size() - cursor.offset_dw);
-			cursor.offset_dw += cursor.deferred_advance_dw;
-			cursor.deferred_advance_dw = 0;
-			execution.m_made_progress  = true;
-			continue;
-		}
 		if (cursor.offset_dw == cursor.commands.size()) {
 			execution.m_buffer_stack.pop_back();
 			continue;
@@ -783,14 +775,19 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
-			if (execution.m_buffer_stack.size() > buffer_index + 1) {
-				execution.m_buffer_stack[buffer_index].deferred_advance_dw = packet_dw;
-			}
 			return;
 		}
-		EXIT_IF(execution.m_buffer_stack.size() != buffer_index + 1);
-		execution.m_buffer_stack[buffer_index].offset_dw += packet_dw;
+		cursor.offset_dw += packet_dw;
 		execution.m_made_progress = true;
+		if (!execution.m_next_buffer.empty()) {
+			// Chains and taken branches reuse the fetcher; only calls retain a return cursor.
+			if (execution.m_chain) {
+				cursor = {execution.m_next_buffer};
+			} else {
+				execution.m_buffer_stack.push_back({execution.m_next_buffer});
+			}
+			execution.m_next_buffer = {};
+		}
 	}
 }
 
@@ -825,35 +822,54 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
                                       const volatile void* address, uint32_t count_in_dwords) {
-	if (wait_op != 0) {
-		BufferFlushAndWait();
-	}
-
 	(void)count_in_dwords;
+	uint64_t value = 0;
 
 	switch (op) {
-		case 0x00: {
+		case 0x00:
 			m_predicate_skip = false;
-		} break;
-		case 0x03: {
+			return;
+		case 0x01: {
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
-
-			auto value = *reinterpret_cast<const volatile uint64_t*>(address);
-
-			switch (condition) {
-				case 0x00: m_predicate_skip = (value != 0); break;
-				case 0x01: m_predicate_skip = (value == 0); break;
-				default: EXIT("unknown predication condition: 0x%08" PRIx32 "\n", condition);
-			}
-			static std::atomic<uint32_t> log_count {0};
-			if (log_count.fetch_add(1) < 128) {
-				LOGF("\t bool predication: addr=0x%016" PRIx64 ", value=0x%016" PRIx64
-				     ", condition=%" PRIu32 ", skip=%u, wait_op=%" PRIu32 "\n",
-				     reinterpret_cast<uint64_t>(address), value, condition,
-				     m_predicate_skip ? 1u : 0u, wait_op);
+			// One begin/end pair per DB; bit 63 marks each counter ready.
+			constexpr uint64_t ready_bit = 1ull << 63u;
+			const auto* results = reinterpret_cast<const volatile uint64_t*>(address);
+			for (uint32_t db = 0; db < 16u; db++) {
+				const auto begin = results[db * 2u];
+				const auto end   = results[db * 2u + 1u];
+				if ((begin & end & ready_bit) == 0) {
+					if (wait_op == 0) {
+						SuspendPm4();
+					} else {
+						m_predicate_skip = false;
+					}
+					return;
+				}
+				value += end - begin;
 			}
 		} break;
+		case 0x03:
+			if (wait_op != 0) {
+				BufferFlushAndWait();
+			}
+			EXIT_NOT_IMPLEMENTED(address == nullptr);
+			value = *reinterpret_cast<const volatile uint64_t*>(address);
+			break;
 		default: EXIT("unknown predication op: 0x%08" PRIx32 "\n", op);
+	}
+	switch (condition) {
+		case 0x00: m_predicate_skip = (value != 0); break;
+		case 0x01: m_predicate_skip = (value == 0); break;
+		default: EXIT("unknown predication condition: 0x%08" PRIx32 "\n", condition);
+	}
+	if (op == 0x03) {
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1) < 128) {
+			LOGF("\t bool predication: addr=0x%016" PRIx64 ", value=0x%016" PRIx64
+			     ", condition=%" PRIu32 ", skip=%u, wait_op=%" PRIu32 "\n",
+			     reinterpret_cast<uint64_t>(address), value, condition,
+			     m_predicate_skip ? 1u : 0u, wait_op);
+		}
 	}
 }
 
@@ -1061,9 +1077,6 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 
 	uint32_t frame_num = 0;
-	// uint32_t local_x   = 1;
-	// uint32_t local_y   = 1;
-	// uint32_t local_z   = 1;
 
 	{
 		CheckBuffer();
@@ -1087,45 +1100,24 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		}
 
 		const auto& cs = m_sh_ctx.GetCs().cs_regs;
-		// local_x        = std::max(cs.num_thread_x, 1u);
-		// local_y        = std::max(cs.num_thread_y, 1u);
-		// local_z        = std::max(cs.num_thread_z, 1u);
-		if (cs.wave_size == 64u) {
-			static std::atomic_bool logged_wave64_shader {false};
-			if (!logged_wave64_shader.exchange(true, std::memory_order_relaxed)) {
-				LOGF("warning: executing wave64 compute shader cs=0x%016" PRIx64 "\n",
-				     cs.data_addr);
-				std::printf("warning: executing wave64 compute shader cs=0x%016" PRIx64 "\n",
-				            cs.data_addr);
-				std::fflush(stdout);
-			}
-		}
-
 		m_renderer.GetRenderExecutor().DispatchDirect(m_submit_id, CurrentBuffer(), thread_group_x,
 		                                              thread_group_y, thread_group_z, mode);
 	}
 
-	/*constexpr uint32_t DispatchInitiatorUseThreadDimensions = 1u << 5u;
-	auto               group_count = [](uint32_t threads, uint32_t group_size) {
-	    return (threads == 0
-	                ? 0u
-	                : (threads + std::max(group_size, 1u) - 1u) / std::max(group_size, 1u));
-	};
-
-	auto groups_x = thread_group_x;
-	auto groups_y = thread_group_y;
-	auto groups_z = thread_group_z;
-	if ((mode & DispatchInitiatorUseThreadDimensions) != 0) {
-	    groups_x = group_count(thread_group_x, local_x);
-	    groups_y = group_count(thread_group_y, local_y);
-	    groups_z = group_count(thread_group_z, local_z);
+	// Restore the pre-b2963aa compute ordering only when diagnosing GPU stalls.
+	// The normal path keeps dispatches asynchronous.
+	static const bool sync_compute = [] {
+		const char* value = std::getenv("KYTY_SYNC_COMPUTE");
+		const bool  enabled = value != nullptr && value[0] == '1' && value[1] == '\0';
+		if (enabled) {
+			std::printf("Diagnostic: synchronous guest compute enabled\n");
+			std::fflush(stdout);
+		}
+		return enabled;
+	}();
+	if (sync_compute && thread_group_x != 0 && thread_group_y != 0 && thread_group_z != 0) {
+		BufferFlushAndWait();
 	}
-
-	const uint64_t invocations =
-	    static_cast<uint64_t>(groups_x) * groups_y * groups_z * local_x * local_y * local_z;
-	if (invocations != 0) {
-	    BufferFlushAndWait();
-	}*/
 }
 
 void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
@@ -1292,6 +1284,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 								break;
 							case 0x14:
 							case 0x28:
+							case 0x2f:
 								if (event_index == 0x00) {
 									write64(false);
 									return;
@@ -1299,7 +1292,6 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 								break;
 							case 0x2b:
 							case 0x2d:
-							case 0x2f:
 							case 0x30:
 								if (event_index == 0x00 && !with_interrupt) {
 									write64(false);

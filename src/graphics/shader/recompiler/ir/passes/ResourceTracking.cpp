@@ -5,6 +5,8 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 #include <fmt/format.h>
 #include <span>
 #include <utility>
@@ -164,6 +166,14 @@ private:
 		const auto message =
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
+		// The guest bytecode is only dumped after a successful compile, so keep the IR that failed.
+		const auto dump_path = fmt::format("shader_tracking_failure_{:016x}.ir.txt", m_program.shader_hash);
+		if (auto* file = std::fopen(dump_path.c_str(), "wb"); file != nullptr) {
+			const auto text = message + "\n\n" + ProgramToString(m_program);
+			std::fwrite(text.data(), 1, text.size(), file);
+			std::fclose(file);
+			std::fprintf(stderr, "shader resource tracking: IR written to %s\n", dump_path.c_str());
+		}
 		EXIT("%s", message.c_str());
 		std::abort();
 	}
@@ -234,6 +244,35 @@ private:
 		return !value.Uses().empty() && std::ranges::all_of(value.Uses(), [&](const Use& use) {
 			return std::ranges::find(users, use.user) != users.end();
 		});
+	}
+
+	// True when the value can differ between lanes or control paths, so a descriptor read from
+	// memory at that value cannot be proven by a single per-draw evaluation.
+	static bool DependsOnLaneValue(Value root) {
+		std::vector<const Inst*> pending;
+		std::vector<const Inst*> visited;
+		if (const auto* inst = root.Resolve().TryInstruction(); inst != nullptr) {
+			pending.push_back(inst);
+		}
+		while (!pending.empty()) {
+			const auto* inst = pending.back();
+			pending.pop_back();
+			if (std::ranges::find(visited, inst) != visited.end()) {
+				continue;
+			}
+			visited.push_back(inst);
+			const auto op = inst->GetOpcode();
+			if (op == ValueOpcode::ReadFirstLane || op == ValueOpcode::LaneId ||
+			    op == ValueOpcode::Phi) {
+				return true;
+			}
+			for (size_t index = 0; index < inst->NumArgs(); index++) {
+				if (const auto* arg = inst->Arg(index).Resolve().TryInstruction(); arg != nullptr) {
+					pending.push_back(arg);
+				}
+			}
+		}
+		return false;
 	}
 
 	const MemoryInfo* ScalarReadMemory(const Inst& read, uint32_t& index) const {
@@ -312,9 +351,9 @@ private:
 		} else {
 			return false;
 		}
-		const auto* selector_inst = selector.TryInstruction();
-		return stride != 0u && selector_inst != nullptr &&
-		       selector_inst->GetOpcode() == ValueOpcode::ReadFirstLane;
+		// Materialization probes every record of the material buffer, so the selector itself is
+		// never evaluated; it may be any per-pixel value (NHL 26 computes it from G-buffer data).
+		return stride != 0u && !selector.IsEmpty();
 	}
 
 	bool TryMakeIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
@@ -364,7 +403,7 @@ private:
 		}
 		uint32_t    material_memory_index = 0;
 		const auto* material_memory       = ScalarReadMemory(*material_read, material_memory_index);
-		if (material_memory == nullptr || material_memory->offset != 0u ||
+		if (material_memory == nullptr ||
 		    !MemoryIndexBelongsTo(material_memory_index, *material_read)) {
 			return false;
 		}
@@ -380,16 +419,30 @@ private:
 		                         selector_offset)) {
 			return false;
 		}
+		// The key field may sit inside the record (the read's own offset) rather than in an IAdd.
+		selector_offset += material_memory->offset;
 
-		const std::array<const Inst*, 1> material_users {shift};
-		std::array<const Inst*, 8>       heap_users {};
-		std::copy(heap_reads.begin(), heap_reads.end(), heap_users.begin());
-		const std::array<const Inst*, 1> image_users {&handle};
-		if (!UsesOnly(*material_read, material_users) || !UsesOnly(*shift, heap_users)) {
-			return false;
-		}
+		// Only the heap reads become planning-only; the key read and its shift stay live, so
+		// other users of them (masks, phis) are unaffected.
+		// Heap reads may feed several identical handles (e.g. ImageQueryLod and ImageSampleRaw on
+		// the same texture). Each such handle gets its own plan over the same reads, so they can all
+		// become planning-only; any other user keeps the reads live and rejects the pattern.
+		const auto is_sibling_handle = [&](const Inst* user) {
+			if (user == nullptr || user->GetOpcode() != ValueOpcode::GetImageResource ||
+			    user->NumArgs() != heap_reads.size()) {
+				return false;
+			}
+			for (uint32_t dword = 0; dword < heap_reads.size(); dword++) {
+				if (user->Arg(dword).Resolve().TryInstruction() != heap_reads[dword]) {
+					return false;
+				}
+			}
+			return true;
+		};
 		for (const auto* read: heap_reads) {
-			if (!UsesOnly(*read, image_users)) {
+			if (read->Uses().empty() ||
+			    !std::ranges::all_of(read->Uses(),
+			                         [&](const Use& use) { return is_sibling_handle(use.user); })) {
 				return false;
 			}
 		}
@@ -463,20 +516,41 @@ private:
 		}
 		DescriptorSource descriptor;
 		MakeSource(*handle, width, sampler, sample_adjust, descriptor, pc);
+		// Image dwords read from a buffer at a draw-constant offset (e.g. heap[srt_const << 5]) are
+		// evaluated per draw like any other runtime value. A lane- or path-dependent offset needs
+		// the material/heap indirect image proof, which this handle did not match.
 		uint32_t bad_dword = 0;
-		if (expected == ValueOpcode::GetImageResource) {
-			for (; bad_dword < descriptor.dword_count; bad_dword++) {
-				const auto* value = descriptor.dwords[bad_dword].Resolve().TryInstruction();
-				if (value != nullptr && value->GetOpcode() == ValueOpcode::ReadConstBuffer) {
-					Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-					                     ValueOpcodeName(expected), bad_dword));
+		if (expected == ValueOpcode::GetImageResource || expected == ValueOpcode::GetBufferResource) {
+			bool unprovable = false;
+			for (uint32_t dword = 0; dword < descriptor.dword_count && !unprovable; dword++) {
+				const auto* value = descriptor.dwords[dword].Resolve().TryInstruction();
+				unprovable = value != nullptr && value->GetOpcode() == ValueOpcode::ReadConstBuffer &&
+				             DependsOnLaneValue(descriptor.dwords[dword]);
+			}
+			if (unprovable) {
+				// A texture or buffer chosen per pixel from an arbitrary buffer (not the
+				// material/heap table proof) cannot be enumerated for a static binding. Bind a null
+				// resource so the draw survives: images sample zero, and a zero buffer descriptor
+				// binds the renderer's NULL_BUFFER so its bounds-checked reads return zero.
+				const bool image = expected == ValueOpcode::GetImageResource;
+				std::fprintf(stderr,
+				             "shader resource tracking: hash=0x%016" PRIx64
+				             " pc=0x%08x %s selected per pixel from a buffer; binding a null %s\n",
+				             m_program.shader_hash, pc, image ? "texture" : "buffer",
+				             image ? "image" : "buffer");
+				for (uint32_t dword = 0; dword < descriptor.dword_count; dword++) {
+					descriptor.dwords[dword] = Value(0u);
 				}
 			}
-			bad_dword = 0;
 		}
 		if (!ValidateSource(descriptor, bad_dword)) {
-			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-			                     ValueOpcodeName(expected), bad_dword));
+			const auto* value      = descriptor.dwords[bad_dword].Resolve().TryInstruction();
+			const bool  from_buffer = value != nullptr && value->GetOpcode() == ValueOpcode::ReadConstBuffer;
+			Fail(pc, fmt::format("{} dword {} is not a valid runtime value{}",
+			                     ValueOpcodeName(expected), bad_dword,
+			                     from_buffer ? " (buffer read with a non-uniform offset that did not "
+			                                   "match the material/heap indirect image pattern)"
+			                                 : ""));
 		}
 		source = InternSource(descriptor);
 	}

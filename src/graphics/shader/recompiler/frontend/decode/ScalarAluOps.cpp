@@ -33,6 +33,7 @@ constexpr OpcodeMap SOP2_OPCODE_LIST[] = {
     {0x31u, Opcode::S_LSHL4_ADD_U32},   {0x32u, Opcode::S_PACK_LL_B32_B16},
     {0x33u, Opcode::S_PACK_LH_B32_B16}, {0x34u, Opcode::S_PACK_HH_B32_B16},
     {0x35u, Opcode::S_MUL_HI_U32},
+    {0x36u, Opcode::S_MUL_HI_I32},
 };
 
 constexpr OpcodeMap SOP1_OPCODE_LIST[] = {
@@ -56,6 +57,7 @@ constexpr OpcodeMap SOP1_OPCODE_LIST[] = {
     {0x1eu, Opcode::S_BITSET1_B64},
     {0x1fu, Opcode::S_GETPC_B64},
     {0x20u, Opcode::S_SETPC_B64},
+    {0x21u, Opcode::S_SOP1_21}, // NHL 26: null destination, one source; no guest-visible state
     {0x24u, Opcode::S_AND_SAVEEXEC_B64},
     {0x28u, Opcode::S_ORN2_SAVEEXEC_B64},
     {0x2du, Opcode::S_QUADMASK_B64},

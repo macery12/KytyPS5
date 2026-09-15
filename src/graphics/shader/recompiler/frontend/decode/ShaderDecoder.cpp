@@ -381,6 +381,25 @@ void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Inst
 	}
 }
 
+Program DecodeFrontProgram(std::span<const uint32_t> front) {
+	Program  result;
+	uint32_t front_words = 0;
+	while (front_words < front.size()) {
+		auto& inst = result.instructions.emplace_back();
+		DecodeInstruction(front, front_words, inst);
+		front_words += inst.word_count;
+		if (inst.opcode == Opcode::S_SETPC_B64) {
+			EXIT_NOT_IMPLEMENTED(inst.src0.kind != OperandKind::Sgpr || inst.src0.reg != 6u);
+			break;
+		}
+		EXIT_NOT_IMPLEMENTED(inst.opcode == Opcode::S_ENDPGM);
+	}
+	EXIT_IF(result.instructions.empty() ||
+	        result.instructions.back().opcode != Opcode::S_SETPC_B64);
+	result.code = front.first(front_words);
+	return result;
+}
+
 void DecodeProgram(std::span<const uint32_t> code, Program& program) {
 	program.instructions.clear();
 	program.instructions.reserve(code.size());
@@ -519,6 +538,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::S_SENDMSG:
 		case Opcode::S_TTRACEDATA:
 		case Opcode::S_INST_PREFETCH:
+		case Opcode::S_SOP1_21:
 			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: {} {}", inst.pc,
 			                                               magic_enum::enum_name(inst.opcode),
 			                                               OperandToString(inst.src0).c_str()));

@@ -317,24 +317,10 @@ endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL2-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak)
 
-# Linux system libraries required by the static FFmpeg archive.
+# Linux system libraries.
 if(LINUX)
 	find_package(Threads REQUIRED)
 	list(APPEND kyty_emulator_link_libraries m ${CMAKE_DL_LIBS} Threads::Threads)
-
-	# Optional FFmpeg dependencies.
-	find_package(ZLIB)
-	if(ZLIB_FOUND)
-		list(APPEND kyty_emulator_link_libraries ZLIB::ZLIB)
-	endif()
-	find_library(KYTY_BZ2_LIBRARY bz2)
-	if(KYTY_BZ2_LIBRARY)
-		list(APPEND kyty_emulator_link_libraries ${KYTY_BZ2_LIBRARY})
-	endif()
-	find_library(KYTY_LZMA_LIBRARY lzma)
-	if(KYTY_LZMA_LIBRARY)
-		list(APPEND kyty_emulator_link_libraries ${KYTY_LZMA_LIBRARY})
-	endif()
 endif()
 
 set(inc_headers
@@ -342,6 +328,7 @@ set(inc_headers
 	${KYTY_THIRD_PARTY_DIR}/SDL2/include
 	${KYTY_THIRD_PARTY_DIR}/VulkanMemoryAllocator/include
 	${KYTY_THIRD_PARTY_DIR}/SPIRV-Tools/include
+	${KYTY_THIRD_PARTY_DIR}/SPIRV-Headers/include
 	${KYTY_THIRD_PARTY_DIR}/fmt/include
 	${KYTY_THIRD_PARTY_DIR}/xxhash
 	${KYTY_THIRD_PARTY_DIR}/cpuinfo/include
@@ -474,6 +461,9 @@ target_include_directories(event_queue_lifetime_tests PRIVATE ${inc_headers})
 add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
 
+add_kyty_full_emulator_test(json2_exports_tests
+	"${KYTY_TESTS_DIR}/Json2ExportsTests.cpp")
+
 add_executable(sync_on_address_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SyncOnAddressTests.cpp"
 	"${KYTY_SOURCE_DIR}/kernel/syncOnAddress.cpp"
@@ -545,11 +535,16 @@ if(BUILD_TESTING)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
+	add_test(NAME json2_exports COMMAND $<TARGET_FILE:json2_exports_tests>)
 	add_test(NAME sync_on_address COMMAND $<TARGET_FILE:sync_on_address_tests>)
 	add_test(NAME audio_out2_port COMMAND $<TARGET_FILE:audio_out2_port_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
+	add_test(NAME graphics_pipeline_rasterization
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	add_test(NAME graphics_draw_offsets
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME virtual_memory_allocation
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests>)
 	add_test(NAME guest_red_zone_patcher
@@ -603,6 +598,7 @@ if(BUILD_TESTING)
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests
+		json2_exports_tests
 		sync_on_address_tests
 		shader_recompiler_compute_tests
 		virtual_memory_allocation_tests

@@ -317,12 +317,13 @@ void TestInvariantIndirectImageMaterialization() {
 
   const auto prior_snapshot = snapshot;
   const auto prior_specialization = specialization;
+  // An unreadable material probe is skipped rather than failing the table; with every other
+  // key still 0 the result must match the fully readable materialization.
   memory.fail_address = 0x1004u;
-  Check(!MaterializeResources(resource_plan, runtime, snapshot,
-                              specialization) &&
+  Check(MaterializeResources(resource_plan, runtime, snapshot, specialization) &&
             SameResourceSnapshot(snapshot, prior_snapshot) &&
             specialization == prior_specialization,
-        "rejected planning memory read mutated the snapshot");
+        "unreadable material probe changed the materialized table");
   memory.fail_address = UINT64_MAX;
 
   memory.words[(0x1000u - memory.base + 36u) / 4u] = 1u;
@@ -439,22 +440,37 @@ void TestInvariantIndirectImageMaterialization() {
         "rejected indirect table descriptor read mutated the snapshot");
   memory.fail_address = UINT64_MAX;
 
+  // A malformed table cannot be proven, so the texture degrades to a null image instead of
+  // aborting the shader; it must never be bound through the unproven per-pixel reads.
   auto malformed = MakeIndirectImageFixture(true);
   BuildSrtPlan(malformed->program);
-  CheckFatal([&] { TrackResources(malformed->program); }, "not a valid runtime value",
-             "malformed indirect image pattern was accepted");
-  Check(!malformed->program.resource_tracking_complete &&
-            malformed->program.info.images.empty() &&
-            malformed->program.descriptor_sources.empty(),
-        "malformed indirect image pattern was partially accepted");
+  TrackResources(malformed->program);
+  bool malformed_null = malformed->program.resource_tracking_complete &&
+                        malformed->program.info.images.size() == 1u;
+  if (malformed_null) {
+    const auto &source =
+        malformed->program.descriptor_sources[malformed->program.info.images[0].source];
+    malformed_null = !source.indirect_image.has_value();
+    for (uint32_t dword = 0; dword < source.dword_count && malformed_null; dword++) {
+      const auto value = source.dwords[dword].Resolve();
+      malformed_null = value.IsImmediate() && value.U32() == 0u;
+    }
+  }
+  Check(malformed_null, "malformed indirect image pattern was not degraded to a null image");
 
+  // A key field stored as the read's own immediate (NHL 26) folds into the selector offset;
+  // materialization enumerates every wrapped offset modulo the stride, so the proof holds.
   auto wrapped_immediate = MakeIndirectImageFixture(false, 4u);
   BuildSrtPlan(wrapped_immediate->program);
-  CheckFatal([&] { TrackResources(wrapped_immediate->program); },
-             "not a valid runtime value",
-             "wrapped scalar immediate entered the invariant image proof");
-  Check(!wrapped_immediate->program.resource_tracking_complete,
-        "wrapped scalar immediate entered the invariant image proof");
+  TrackResources(wrapped_immediate->program);
+  bool folded_immediate = false;
+  for (const auto &source : wrapped_immediate->program.descriptor_sources) {
+    folded_immediate |= source.indirect_image.has_value() &&
+                        source.indirect_image->selector_stride == 224u &&
+                        source.indirect_image->selector_offset == 8u;
+  }
+  Check(wrapped_immediate->program.resource_tracking_complete && folded_immediate,
+        "material read immediate was not folded into the indirect selector offset");
 }
 
 void TestComputeBufferFill() {

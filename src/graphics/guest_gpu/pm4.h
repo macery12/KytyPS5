@@ -881,6 +881,8 @@ constexpr uint32_t SPI_SHADER_USER_ACCUM_LSHS_0                   = 0x132;
 constexpr uint32_t SPI_SHADER_USER_ACCUM_LSHS_3                   = 0x135;
 constexpr uint32_t SPI_SHADER_PGM_LO_LS                           = 0x148;
 constexpr uint32_t SPI_SHADER_PGM_HI_LS                           = 0x149;
+constexpr uint32_t SPI_SHADER_PGM_RSRC1_LS                        = 0x14A;
+constexpr uint32_t SPI_SHADER_PGM_RSRC2_LS                        = 0x14B;
 constexpr uint32_t COMPUTE_START_X                                = 0x204;
 constexpr uint32_t COMPUTE_START_Y                                = 0x205;
 constexpr uint32_t COMPUTE_START_Z                                = 0x206;
@@ -986,6 +988,12 @@ constexpr uint32_t GE_USER_VGPR_EN_EN_USER_VGPR2_SHIFT = 1;
 constexpr uint32_t GE_USER_VGPR_EN_EN_USER_VGPR2_MASK  = 0x1;
 constexpr uint32_t GE_USER_VGPR_EN_EN_USER_VGPR3_SHIFT = 2;
 constexpr uint32_t GE_USER_VGPR_EN_EN_USER_VGPR3_MASK  = 0x1;
+
+constexpr uint32_t FSR_WINDOW_LEFT           = 0x2BC;
+constexpr uint32_t FSR_CONTROL_POINTS_LEFT_X = 0x2C4;
+constexpr uint32_t FSR_CONTROL_POINTS_LEFT_Y = 0x2CC;
+constexpr uint32_t FSR_ALPHA_LEFT_X          = 0x2E4;
+constexpr uint32_t FSR_ALPHA_LEFT_Y          = 0x2E8;
 
 constexpr uint32_t TA_CS_BC_BASE_ADDR       = 0x380;
 constexpr uint32_t TA_CS_BC_BASE_ADDR_HI    = 0x381;

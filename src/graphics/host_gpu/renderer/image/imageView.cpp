@@ -21,14 +21,7 @@ namespace {
 	}
 }
 
-[[nodiscard]] bool IsStencilViewFormat(vk::Format format) {
-	switch (format) {
-		case vk::Format::eS8Uint:
-		case vk::Format::eR8Uint:
-		case vk::Format::eR8Unorm: return true;
-		default: return false;
-	}
-}
+using ImageViewOps::IsStencilViewFormat;
 
 [[nodiscard]] bool IsValidViewType(const VulkanImage& image, const ImageViewInfo& info) {
 	switch (image.image_type) {
@@ -310,6 +303,12 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	const auto& image      = backing;
 	auto        normalized = view_info;
 	const bool  is_storage = static_cast<bool>(normalized.usage & vk::ImageUsageFlagBits::eStorage);
+	if (is_storage && !(image.usage & vk::ImageUsageFlagBits::eStorage)) {
+		EXIT("storage view requested for image without storage usage: image_format=%d "
+		     "view_format=%d flags=0x%x\n",
+		     static_cast<int>(image.format), static_cast<int>(normalized.format),
+		     static_cast<vk::ImageCreateFlags::MaskType>(image.flags));
+	}
 	const auto  image_aspect = FullAspectMask(image.format);
 	if (image_aspect & vk::ImageAspectFlagBits::eDepth &&
 	    ImageViewOps::IsFormatDepthCompatible(normalized.format)) {
@@ -322,6 +321,12 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		normalized.aspect = vk::ImageAspectFlagBits::eStencil;
 	}
 	normalized.usage = is_storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlags {};
+	for (const auto& cached: views) {
+		if (cached.info == normalized) {
+			return cached.view;
+		}
+	}
+
 	const bool format_compatible = normalized.format != vk::Format::eUndefined &&
 	                               ImageViewOps::FormatsCompatible(image.format, normalized.format);
 	const bool slice_view =
@@ -349,12 +354,6 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		     normalized.level_count, normalized.base_layer, normalized.layer_count,
 		     static_cast<vk::ImageUsageFlags::MaskType>(normalized.usage), image.mip_levels,
 		     image.layers);
-	}
-
-	for (const auto& cached: views) {
-		if (cached.info == normalized) {
-			return cached.view;
-		}
 	}
 
 	vk::ImageViewUsageCreateInfo usage {};

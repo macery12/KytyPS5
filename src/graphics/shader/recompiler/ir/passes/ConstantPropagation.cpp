@@ -228,6 +228,15 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			const auto offset = Arg(inst, 1);
 			const auto count  = Arg(inst, 2);
 			auto* source = value.TryInstruction();
+			if (source != nullptr && source->GetOpcode() == ValueOpcode::ShiftLeftLogical32 &&
+			    IsImmediate(offset, Type::U32) && IsImmediate(count, Type::U32)) {
+				const auto shift = Arg(*source, 1);
+				if (IsImmediate(shift, Type::U32) && shift.U32() < 32u &&
+				    offset.U32() <= shift.U32() && count.U32() <= shift.U32() - offset.U32()) {
+					Replace(inst, Value(0u));
+					return;
+				}
+			}
 			if (source != nullptr && source->GetOpcode() == ValueOpcode::GetBuiltin &&
 			    source->Arg(0) == Value(static_cast<uint32_t>(StageInputKind::PackedAncillary)) &&
 			    IsImmediate(offset, Type::U32) && IsImmediate(count, Type::U32) && count.U32() != 0u) {
@@ -629,6 +638,34 @@ void ConstantPropagationPass(const BlockList& blocks) {
 		});
 		if (retained_only) {
 			Replace(*source, Value(0u));
+		}
+	}
+	// Any other live use (whole-value reads, masks, shifts, fields spanning a boundary) cannot be
+	// emitted directly. Rebuild the packed word from its host-visible fields, SampleId in bits
+	// 8..11 and Layer in bits 16..26, leaving every other bit zero.
+	for (auto* block: blocks) {
+		for (auto inst = block->begin(); inst != block->end(); ++inst) {
+			if (inst->GetOpcode() != ValueOpcode::GetBuiltin || !inst->HasUses() ||
+			    inst->Arg(0) != Value(static_cast<uint32_t>(StageInputKind::PackedAncillary))) {
+				continue;
+			}
+			const auto sample_id = block->PrependNewInst(
+			    inst, ValueOpcode::GetBuiltin,
+			    {Value(static_cast<uint32_t>(StageInputKind::SampleId)), Value(0u)});
+			const auto layer = block->PrependNewInst(
+			    inst, ValueOpcode::GetBuiltin,
+			    {Value(static_cast<uint32_t>(StageInputKind::Layer)), Value(0u)});
+			const auto sample_bits = block->PrependNewInst(
+			    inst, ValueOpcode::BitwiseAnd32, {Value(&*sample_id), Value(0xfu)});
+			const auto sample_field = block->PrependNewInst(
+			    inst, ValueOpcode::ShiftLeftLogical32, {Value(&*sample_bits), Value(8u)});
+			const auto layer_bits = block->PrependNewInst(
+			    inst, ValueOpcode::BitwiseAnd32, {Value(&*layer), Value(0x7ffu)});
+			const auto layer_field = block->PrependNewInst(
+			    inst, ValueOpcode::ShiftLeftLogical32, {Value(&*layer_bits), Value(16u)});
+			const auto packed = block->PrependNewInst(
+			    inst, ValueOpcode::BitwiseOr32, {Value(&*sample_field), Value(&*layer_field)});
+			Replace(*inst, Value(&*packed));
 		}
 	}
 }

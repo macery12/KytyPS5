@@ -241,7 +241,7 @@ struct CommandBuffer {
 
 	void DbgDump() const {
 		if (!Config::GraphicsDebugDumpEnabled() ||
-		    Config::GetPrintfDirection() == Config::OutputDirection::Silent) {
+		    Config::GetPrintfDirection() == Config::LogDirection::Silent) {
 			return;
 		}
 		static std::atomic<uint32_t> log_count {0};
@@ -630,6 +630,20 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	     reinterpret_cast<uint64_t>(header), reinterpret_cast<uint64_t>(code));
 
 	auto* h = static_cast<Shader*>(header);
+
+	// Header fields are self-relative offsets until the first create; a relocated pointer is
+	// never below its own field address. Games may create the same header twice, and relocating
+	// again would double every pointer and the program address register.
+	auto is_relocated = [](const auto& m) {
+		return m != nullptr && reinterpret_cast<uintptr_t>(m) >= reinterpret_cast<uintptr_t>(&m);
+	};
+	if (is_relocated(h->cx_registers) || is_relocated(h->sh_registers) ||
+	    is_relocated(h->user_data) || is_relocated(h->specials) ||
+	    is_relocated(h->input_semantics) || is_relocated(h->output_semantics)) {
+		EXIT_NOT_IMPLEMENTED(h->code != code);
+		*dst = h;
+		return OK;
+	}
 
 	auto update_addr = [](auto& m) {
 		if (m != nullptr) {

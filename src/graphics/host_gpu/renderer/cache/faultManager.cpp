@@ -44,12 +44,7 @@ FaultManager::FaultManager(GraphicContext& graphics, CommandScheduler& scheduler
 	                                                &m_fault_process_desc_layout),
 	    "create fault-buffer descriptor layout");
 
-	vk::ShaderModuleCreateInfo module_info {};
-	module_info.codeSize = std::size(FAULT_BUFFER_PROCESS_SPV) * sizeof(uint32_t);
-	module_info.pCode    = FAULT_BUFFER_PROCESS_SPV;
-	vk::ShaderModule module = nullptr;
-	RequireVulkanSuccess(m_graphics.device.createShaderModule(&module_info, nullptr, &module),
-	                     "create fault-buffer shader module");
+	const auto module = CompileSPV(FAULT_BUFFER_PROCESS_SPV, m_graphics.device);
 
 	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
 	pipeline_layout_info.setLayoutCount = 1;
@@ -128,7 +123,10 @@ void FaultManager::ProcessFaultBuffer() {
 	                             m_fault_process_pipeline_layout, 0, writes);
 	const auto num_threads    = BufferCache::CACHING_NUMPAGES / 32;
 	const auto num_workgroups = (num_threads + 63) / 64;
-	command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
+	{
+		VulkanDebugLabelScope scope(command, "Kyty FaultManager parse buffer");
+		command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
+	}
 	dependency.pBufferMemoryBarriers = &post_barrier;
 	command.pipelineBarrier2(dependency);
 

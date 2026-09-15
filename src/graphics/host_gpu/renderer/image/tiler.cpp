@@ -1,6 +1,8 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include "common/alignment.h"
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "gpu_tiler_shaders/gpu_tiler_demote_d16_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_depth_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_promote_d16_spv.h"
@@ -221,7 +223,7 @@ void TileManager::Prepare(bool tile, uint64_t tiled_capacity, uint64_t linear_ca
 
 	const uint64_t uniform_alignment =
 	    std::max<uint64_t>(limits.minUniformBufferOffsetAlignment, 1);
-	const uint64_t stride = (sizeof(Push) + uniform_alignment - 1) & ~(uniform_alignment - 1);
+	const uint64_t stride = Common::AlignUp<uint64_t>(sizeof(Push), uniform_alignment);
 	EXIT_NOT_IMPLEMENTED(dispatches.size() > UINT64_MAX / stride);
 	const uint64_t bytes  = dispatches.size() * stride;
 	auto [mapped, offset] = m_stream_buffer.Map(bytes, uniform_alignment);
@@ -259,12 +261,8 @@ vk::Pipeline TileManager::GetPipeline(uint32_t slot) {
 	const uint32_t                   values[] {1u << element_index, direction_index};
 	const vk::SpecializationMapEntry entries[] {{0, 0, 4}, {1, 4, 4}};
 	const vk::SpecializationInfo     specialization {2, entries, sizeof(values), values};
-	vk::ShaderModuleCreateInfo       module_info {};
-	module_info.codeSize    = shaders[family_index].words * sizeof(uint32_t);
-	module_info.pCode       = shaders[family_index].code;
-	vk::ShaderModule module = nullptr;
-	RequireVulkanSuccess(m_graphics.device.createShaderModule(&module_info, nullptr, &module),
-	                     "create TileManager shader module");
+	const auto module =
+	    CompileSPV({shaders[family_index].code, shaders[family_index].words}, m_graphics.device);
 	vk::PipelineShaderStageCreateInfo stage {};
 	stage.stage               = vk::ShaderStageFlagBits::eCompute;
 	stage.module              = module;
@@ -284,15 +282,16 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset,
                          uint64_t source_capacity, vk::Buffer target, uint64_t target_offset,
                          uint64_t target_capacity, std::span<Dispatch> dispatches,
                          bool clear_target) {
+	KYTY_PROFILER_FUNCTION();
 	const auto&    limits = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t descriptor_alignment =
 	    std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);
-	const uint64_t source_descriptor_offset = source_offset & ~(descriptor_alignment - 1);
-	const uint64_t target_descriptor_offset = target_offset & ~(descriptor_alignment - 1);
+	const uint64_t source_descriptor_offset = Common::AlignDown(source_offset, descriptor_alignment);
+	const uint64_t target_descriptor_offset = Common::AlignDown(target_offset, descriptor_alignment);
 	const uint64_t source_base              = source_offset - source_descriptor_offset;
 	const uint64_t target_base              = target_offset - target_descriptor_offset;
-	const uint64_t source_range             = (source_base + source_capacity + 3u) & ~uint64_t {3};
-	const uint64_t target_range             = (target_base + target_capacity + 3u) & ~uint64_t {3};
+	const uint64_t source_range             = Common::AlignUp(source_base + source_capacity, 4);
+	const uint64_t target_range             = Common::AlignUp(target_base + target_capacity, 4);
 	EXIT_NOT_IMPLEMENTED(source_range > limits.maxStorageBufferRange ||
 	                     target_range > limits.maxStorageBufferRange || target_offset % 4 != 0 ||
 	                     target_capacity % 4 != 0);
@@ -352,8 +351,11 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset,
 		command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, m_pipeline_layout, 0,
 		                             static_cast<uint32_t>(writes.size()), writes.data());
 		command.bindPipeline(vk::PipelineBindPoint::eCompute, GetPipeline(dispatch.pipeline_slot));
-		command.dispatch((dispatch.push.width + 7u) / 8u, (dispatch.push.height + 7u) / 8u,
-		                 dispatch.push.depth);
+		{
+			VulkanDebugLabelScope scope(command, "Kyty TileManager tile conversion");
+			command.dispatch((dispatch.push.width + 7u) / 8u, (dispatch.push.height + 7u) / 8u,
+			                 dispatch.push.depth);
+		}
 	}
 
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
@@ -372,7 +374,7 @@ TileManager::Result TileManager::Detile(vk::Buffer tiled, uint64_t tiled_offset,
 	const uint64_t        source_base = tiled_offset & (descriptor_alignment - 1);
 	std::vector<Dispatch> dispatches;
 	Prepare(false, tiled_capacity, linear_capacity, infos, source_base, 0, dispatches);
-	auto scratch = AllocateScratch((linear_capacity + 3u) & ~uint64_t {3});
+	auto scratch = AllocateScratch(Common::AlignUp(linear_capacity, 4));
 	DeferDestroy(scratch);
 	Record(tiled, tiled_offset, tiled_capacity, scratch.buffer, 0, scratch.size, dispatches,
 	       true);
@@ -406,7 +408,7 @@ void TileManager::TileImage(Image& image, std::span<const vk::BufferImageCopy> r
 	// Reserve all stream parameters before creating a scheduler-lived scratch dependency:
 	// StreamBuffer::Map is allowed to submit the current tick when it wraps.
 	Prepare(true, tiled_capacity, linear_capacity, infos, 0, target_base, dispatches);
-	auto linear = AllocateScratch((linear_capacity + 3u) & ~uint64_t {3});
+	auto linear = AllocateScratch(Common::AlignUp(linear_capacity, 4));
 	DeferDestroy(linear);
 	image.Download(regions, linear.buffer, 0, linear.size);
 	Result source {linear.buffer, 0, linear.size};
@@ -418,7 +420,7 @@ void TileManager::TileImage(Image& image, std::span<const vk::BufferImageCopy> r
 }
 
 TileManager::Result TileManager::GetScratchBuffer(uint64_t size) {
-	auto scratch = AllocateScratch((size + 3u) & ~uint64_t {3});
+	auto scratch = AllocateScratch(Common::AlignUp(size, 4));
 	DeferDestroy(scratch);
 	return {scratch.buffer, 0, scratch.size};
 }
@@ -426,11 +428,11 @@ TileManager::Result TileManager::GetScratchBuffer(uint64_t size) {
 TileManager::StorageBinding TileManager::BindStorage(Result buffer, uint64_t size) const {
 	const auto& limits            = m_graphics.GetPhysicalDeviceProperties().limits;
 	const auto  alignment         = std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);
-	const auto  descriptor_offset = buffer.offset - buffer.offset % alignment;
+	const auto  descriptor_offset = Common::AlignDown(buffer.offset, alignment);
 	const auto  base              = buffer.offset - descriptor_offset;
 	EXIT_IF(buffer.buffer == nullptr || size == 0 || buffer.size < size || base > UINT32_MAX ||
 	        size > UINT64_MAX - base || base + size > UINT64_MAX - 3);
-	const auto range = (base + size + 3) & ~uint64_t {3};
+	const auto range = Common::AlignUp(base + size, 4);
 	EXIT_IF(range > limits.maxStorageBufferRange || range > UINT32_MAX);
 	return {{buffer.buffer, descriptor_offset, range}, static_cast<uint32_t>(base)};
 }
@@ -471,12 +473,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 			code  = GPU_TILER_DEMOTE_D16_SPV;
 			words = std::size(GPU_TILER_DEMOTE_D16_SPV);
 		}
-		vk::ShaderModuleCreateInfo module_info {};
-		module_info.codeSize    = words * sizeof(uint32_t);
-		module_info.pCode       = code;
-		vk::ShaderModule module = nullptr;
-		RequireVulkanSuccess(m_graphics.device.createShaderModule(&module_info, nullptr, &module),
-		                     "create D16 conversion shader module");
+		const auto module = CompileSPV({code, words}, m_graphics.device);
 		vk::PipelineShaderStageCreateInfo stage {};
 		stage.stage               = vk::ShaderStageFlagBits::eCompute;
 		stage.module              = module;
@@ -512,8 +509,8 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	const auto target_required = required(layout.height, layout.layers, layout.target_row_stride,
 	                                      layout.target_slice_stride, target_active);
 	EXIT_IF(source_required > UINT64_MAX - 3 || target_required > UINT64_MAX - 3);
-	const auto source_barrier_size = (source_required + 3) & ~uint64_t {3};
-	const auto target_barrier_size = (target_required + 3) & ~uint64_t {3};
+	const auto source_barrier_size = Common::AlignUp(source_required, 4);
+	const auto target_barrier_size = Common::AlignUp(target_required, 4);
 	EXIT_IF(source.size < source_barrier_size || target.size < target_barrier_size);
 
 	m_scheduler.EndRendering();
@@ -597,6 +594,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 			push.slice_bytes = static_cast<uint32_t>(layout.target_row_stride);
 			command.pushConstants(m_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 			                      sizeof(push), &push);
+			VulkanDebugLabelScope scope(command, "Kyty TileManager buffer tiling");
 			command.dispatch(static_cast<uint32_t>(groups_x), rows, 1);
 			row += rows;
 		}
@@ -610,12 +608,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 
 void TileManager::SwapBgra16(Result input, Result output, uint32_t pixels) {
 	if (m_swap_bgra16 == nullptr) {
-		vk::ShaderModuleCreateInfo module_info {};
-		module_info.codeSize    = std::size(GPU_TILER_SWAP_BGRA16_SPV) * sizeof(uint32_t);
-		module_info.pCode       = GPU_TILER_SWAP_BGRA16_SPV;
-		vk::ShaderModule module = nullptr;
-		RequireVulkanSuccess(m_graphics.device.createShaderModule(&module_info, nullptr, &module),
-		                     "create BGRA16 swap shader module");
+		const auto module = CompileSPV(GPU_TILER_SWAP_BGRA16_SPV, m_graphics.device);
 		vk::PipelineShaderStageCreateInfo stage {};
 		stage.stage  = vk::ShaderStageFlagBits::eCompute;
 		stage.module = module;
@@ -671,7 +664,10 @@ void TileManager::SwapBgra16(Result input, Result output, uint32_t pixels) {
 	push.width    = pixels;
 	command.pushConstants(m_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push),
 	                      &push);
-	command.dispatch((pixels + 63u) / 64u, 1, 1);
+	{
+		VulkanDebugLabelScope scope(command, "Kyty TileManager SwapBgra16");
+		command.dispatch((pixels + 63u) / 64u, 1, 1);
+	}
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead;
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,

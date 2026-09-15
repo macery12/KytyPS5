@@ -1,5 +1,9 @@
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 namespace Libs::Graphics::ShaderRecompiler::Frontend {
 
 bool Translator::EmitVector(const Decoder::Instruction& inst) {
@@ -39,6 +43,25 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual32, IR::Type::U32, false, false);
 			return true;
 		case O::V_CMPX_NE_U32:
+			// Workaround (default on, KYTY_FORCE_UI_MASK=0 disables): bypass only the final
+			// compositor's per-pixel UI mask. The UI image fetch (menu CS 0x7ec, in-match CS 0x3f0)
+			// is otherwise skipped when this mask is zero, and the mask producer is not emulated
+			// correctly yet. The in-match compositor 6d3c5fef is the same shader family; without it
+			// the HUD and pause menu are drawn but never composited.
+			if ((program.shader_hash == 0xd8ad62a44c60a9a3ull && inst.pc == 0x7b8u) ||
+			    (program.shader_hash == 0x6d3c5fef17d1d7e1ull && inst.pc == 0x3bcu)) {
+				static const bool force_ui_mask = [] {
+					const char* value = std::getenv("KYTY_FORCE_UI_MASK");
+					return value == nullptr || std::strcmp(value, "0") != 0;
+				}();
+				if (force_ui_mask) {
+					std::printf("Diagnostic: forcing NHL 26 compositor UI mask\n");
+					std::fflush(stdout);
+					EmitCompareConstant(inst, true, false, true);
+					return true;
+				}
+			}
+			[[fallthrough]];
 		case O::V_CMPX_NE_I32:
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual32, IR::Type::U32, false, true);
 			return true;
@@ -137,6 +160,9 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 			return true;
 		case O::V_CMP_LT_U16:
 			EmitInteger16Compare(inst, IR::ValueOpcode::ULessThan32, false, false);
+			return true;
+		case O::V_CMPX_LT_U16:
+			EmitInteger16Compare(inst, IR::ValueOpcode::ULessThan32, false, true);
 			return true;
 		case O::V_CMP_LE_U16:
 			EmitInteger16Compare(inst, IR::ValueOpcode::ULessThanEqual32, false, false);
@@ -370,6 +396,7 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_CEIL_F16: return Float16Unary(inst, IR::ValueOpcode::FPCeil32, false);
 		case O::V_TRUNC_F16: return Float16Unary(inst, IR::ValueOpcode::FPTrunc32, false);
 		case O::V_RNDNE_F16: return Float16Unary(inst, IR::ValueOpcode::FPRoundEven32, false);
+		case O::V_FRACT_F16: return Float16Unary(inst, IR::ValueOpcode::FPFract32, false);
 		case O::V_SIN_F16: return Float16Trig(inst, IR::ValueOpcode::FPSin);
 		case O::V_COS_F16: return Float16Trig(inst, IR::ValueOpcode::FPCos);
 		case O::V_MIN3_F16: return Float16Ternary(inst, IR::ValueOpcode::FPMinTri32, false, false);

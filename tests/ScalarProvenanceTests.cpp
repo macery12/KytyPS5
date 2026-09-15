@@ -470,10 +470,12 @@ void TestConstantBufferBounds() {
   overflow.Emit(ValueOpcode::GetBufferResource,
                 {overflow_read, Value(0u), Value(16u), Value(0u)});
   overflow.Plan();
+  // S_BUFFER_LOAD bounds-checks per element and yields zero out of range (as the emitted
+  // shader does), so the walk succeeds and flattens a zero word.
   flat = {0x55u};
-  Check(!WalkSrt(overflow.program, runtime, flat) &&
-            flat == std::vector<uint32_t>{0x55u},
-        "out-of-bounds constant-buffer walk was not transactional");
+  Check(WalkSrt(overflow.program, runtime, flat) &&
+            flat == std::vector<uint32_t>{0u},
+        "out-of-bounds constant-buffer walk did not read zero like the shader");
 }
 
 void TestReadLaneElimination() {

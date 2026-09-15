@@ -11,6 +11,7 @@
 
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 
 using namespace Common;
@@ -49,17 +50,21 @@ static void PrintUsage() {
 	    "  --user-name <name>                   Local user name (1-16 bytes). Default: Kyty.\n");
 	::printf("  --user-id <num>                      Local user ID. Default: %d.\n",
 	         Config::DEFAULT_USER_ID);
+	::printf("  --mic <name>                        Capture from this microphone; omit for silence.\n");
 	::printf(
-	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Fifo.\n");
+	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
 	::printf(
 	    "  --gpu <index>                        Vulkan physical device index. Default: auto.\n");
 	::printf("  --fullscreen                         Run in borderless desktop fullscreen.\n");
+	::printf("  --vr                                 Enable the virtual VR headset.\n");
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
 	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
 	::printf("  --gpu-assisted-validation <t|f>      Bounds-check shader accesses on the GPU.\n"
 	         "                                       Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation <true|false>     Enable shader validation.\n");
+	::printf("  --pre-gen <true|false>               Compile shaders recorded by earlier runs before\n"
+	         "                                       booting, and record new ones. Default: true.\n");
 	::printf("  --shader-optimization-type <value>   None, Size, or Performance.\n");
 	::printf("  --shader-log-direction <value>       Silent, Console, or File.\n");
 	::printf("  --shader-log-folder <path>           Shader log output folder.\n");
@@ -68,7 +73,7 @@ static void PrintUsage() {
 	::printf("  --graphics-debug-dump <true|false>   Enable graphics debug dumps.\n");
 	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
 	::printf("  --printf-output-file <path>          Guest printf output file.\n");
-	::printf("  --profiler-direction <value>         None or Network.\n");
+	::printf("  --profile                            Enable the Tracy profiler.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
@@ -153,6 +158,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (arg == "--rd") {
 			options.config.renderdoc_enabled = true;
+			// RenderDoc's implicit Vulkan layer only loads when this is set before the
+			// Vulkan instance is created; without it captures report "API: None".
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+			_putenv_s("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1");
+#else
+			setenv("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1", 1);
+#endif
 			continue;
 		}
 
@@ -161,8 +173,18 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			continue;
 		}
 
+		if (arg == "--vr") {
+			options.config.vr_enabled = true;
+			continue;
+		}
+
 		if (arg == "--playgo-hack") {
 			options.config.playgo_hack_enabled = true;
+			continue;
+		}
+
+		if (arg == "--profile") {
+			options.config.profiler_enabled = true;
 			continue;
 		}
 
@@ -230,6 +252,8 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid user ID: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--mic") {
+			options.config.audio_input_device = value;
 		} else if (arg == "--present-mode") {
 			if (!ParseEnum(value, options.config.present_mode)) {
 				::printf("invalid present mode: %s\n", value.c_str());
@@ -258,6 +282,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--shader-validation") {
 			if (!ParseBool(value, options.config.shader_validation_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--pre-gen") {
+			if (!ParseBool(value, options.config.pre_gen_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
@@ -292,11 +321,6 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--printf-output-file") {
 			options.config.printf_output_file = value;
-		} else if (arg == "--profiler-direction") {
-			if (!ParseEnum(value, options.config.profiler_direction)) {
-				::printf("invalid profiler direction: %s\n", value.c_str());
-				return false;
-			}
 		} else if (arg == "--spirv-debug-printf") {
 			if (!ParseBool(value, options.config.spirv_debug_printf_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

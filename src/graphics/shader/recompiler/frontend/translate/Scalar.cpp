@@ -12,6 +12,7 @@ bool Translator::EmitScalar(const Decoder::Instruction& inst) {
 		case O::S_WQM_B64: S_WQM(inst, true); return true;
 		case O::S_GETPC_B64: S_GETPC_B64(inst); return true;
 		case O::S_SETPC_B64: return true;
+		case O::S_SOP1_21: EmitControlNop(); return true;
 		case O::S_SUBVECTOR_LOOP_BEGIN: S_SUBVECTOR_LOOP(inst, true); return true;
 		case O::S_SUBVECTOR_LOOP_END: S_SUBVECTOR_LOOP(inst, false); return true;
 		case O::S_CSELECT_B32: S_CSELECT_B32(inst); return true;
@@ -138,6 +139,8 @@ bool Translator::EmitScalar(const Decoder::Instruction& inst) {
 			return SimpleInteger(inst, IR::ValueOpcode::IMul32, IR::Type::U32, false, false, false);
 		case O::S_MUL_HI_U32:
 			return SimpleInteger(inst, IR::ValueOpcode::UMulHi, IR::Type::U32, false, false, false);
+		case O::S_MUL_HI_I32:
+			return SimpleInteger(inst, IR::ValueOpcode::SMulHi, IR::Type::U32, false, false, false);
 		case O::S_AND_B32:
 			return SimpleInteger(inst, IR::ValueOpcode::BitwiseAnd32, IR::Type::U32, false, false,
 			                     true);

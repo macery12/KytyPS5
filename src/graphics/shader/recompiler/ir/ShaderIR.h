@@ -57,17 +57,12 @@ struct MemoryInfo {
 	uint32_t                image_sample_flags       = 0;
 	Decoder::ImageDimension image_dimension          = Decoder::ImageDimension::Unknown;
 	uint32_t                image_address_components = 0;
-	uint32_t                image_nsa_dwords         = 0;
-	uint32_t                image_nsa_addr[Decoder::MaxImageNsaAddressComponents] = {};
-	uint32_t                memory_segment                                        = 0;
 	bool                    address_is_full                                       = false;
 	bool                    data_signed                                           = false;
 	bool                    typed                                                 = false;
 	bool                    formatted                                             = false;
 	bool                    image_has_mip                                         = false;
 	bool                    image_r128                                            = false;
-	bool                    glc                                                   = false;
-	bool                    slc                                                   = false;
 	bool                    idxen                                                 = false;
 	bool                    offen                                                 = false;
 	bool                    planning_only                                         = false;
@@ -155,8 +150,20 @@ struct SampledResourcePair {
 	bool operator==(const SampledResourcePair& other) const = default;
 };
 
+enum class TessellationAttribute {
+	LocalOutput,
+	ControlInput,
+	ControlOutput,
+	EvaluationInput,
+	PatchOutput,
+	Factor
+};
+
 enum class StageInputKind {
 	VertexIndex,
+	InvocationId,
+	PrimitiveId,
+	TessCoord,
 	InstanceIndex,
 	FragCoord,
 	FrontFacing,
@@ -164,6 +171,7 @@ enum class StageInputKind {
 	Layer,
 	SampleId,
 	BaryCoordSmooth,
+	BaryCoordSmoothCentroid,
 	BaryCoordNoPerspective,
 	WorkgroupId,
 	LocalInvocationId,
@@ -251,6 +259,8 @@ struct StageOutput {
 	uint32_t        index    = 0;
 	uint32_t        location = 0;
 	std::string     debug_name;
+	// Dual-source blending puts both MRT exports on one location, split by Index.
+	uint32_t blend_index = 0;
 
 	bool operator==(const StageOutput& other) const = default;
 };
@@ -292,8 +302,12 @@ static_assert(sizeof(PushData) == 128);
 constexpr uint32_t NativePushConstantSize = sizeof(PushData);
 
 [[nodiscard]] constexpr uint32_t NativeBinding(ShaderType stage, DescriptorBindingKind kind) {
+	const uint32_t group = stage == ShaderType::Pixel                    ? 1u
+	                       : stage == ShaderType::TessellationControl    ? 2u
+	                       : stage == ShaderType::TessellationEvaluation ? 3u
+	                                                                     : 0u;
 	return static_cast<uint32_t>(kind) +
-	       (stage == ShaderType::Pixel ? static_cast<uint32_t>(DescriptorBindingKind::Count) : 0u);
+	       group * static_cast<uint32_t>(DescriptorBindingKind::Count);
 }
 
 [[nodiscard]] constexpr ImageResourceClass ImageBindingResourceClass(DescriptorBindingKind kind) {
@@ -414,7 +428,7 @@ struct BindingLayout {
 };
 
 struct ShaderInfo {
-	static constexpr uint32_t MaxBuffers      = 32;
+	static constexpr uint32_t MaxBuffers      = 64;
 	static constexpr uint32_t MaxImages       = 64;
 	static constexpr uint32_t MaxSamplers     = 32;
 	static constexpr uint32_t MaxSampledPairs = 64;
@@ -432,18 +446,6 @@ struct ShaderInfo {
 	bool                             uses_dma           = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
-};
-
-struct SpirvRequirements {
-	bool subgroup_ballot              = false;
-	bool subgroup_shuffle             = false;
-	bool subgroup_local_invocation_id = false;
-	bool compute_derivatives          = false;
-	bool image_gather_extended        = false;
-	bool function_lds                 = false;
-	bool function_scratch             = false;
-	bool pixel_valid_mask             = false;
-	bool buffer_int64_atomics         = false;
 };
 
 struct BlockInfo {
@@ -496,6 +498,7 @@ struct CompiledShaderInfo {
 	uint32_t                      user_data_count     = 64;
 	uint32_t                      scratch_dwords      = 0;
 	uint32_t                      param_export_mask   = 0;
+	bool                          dispatcher_fallback = false;
 	ShaderInfo                    info;
 	BindingLayout                 bindings;
 };
@@ -552,16 +555,14 @@ struct Program: ResourcePlan {
 	CFG::FailureKind              cfg_failure_kind    = CFG::FailureKind::None;
 	std::string                   fallback_reason;
 	std::vector<BlockInfo>        block_info;
-	// Decoded MIMG/VMEM metadata carries details such as RDNA2 NSA address registers and
-	// storage-image swizzles. Typed memory instructions carry a dense index into these shader-local
-	// tables until those fields are consumed by emission.
+	// Typed memory and export instructions reference shader-local metadata by dense index.
+	// Decoder-only details (such as NSA register numbers) have already become IR operands.
 	std::vector<ExportInfo>       export_info;
 	std::vector<Value>            dynamic_reads;
 	bool                          shader_info_complete = false;
 	BindingLayout                 bindings;
 	bool                          binding_layout_complete = false;
 
-	std::optional<SpirvRequirements> spirv_requirements;
 };
 
 std::string ProgramToString(const Program& program);

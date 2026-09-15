@@ -14,7 +14,9 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <fmt/format.h>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +29,47 @@ using VulkanMemoryBarrier = vk::MemoryBarrier;
 
 vk::Format  VulkanFormat(Prospero::BufferFormat guest_format);
 void        RequireVulkanSuccess(vk::Result result, const char* operation);
+vk::ShaderModule CompileSPV(std::span<const uint32_t> code, vk::Device device);
+
+// Guest draws and dispatches are named in the command stream for GPU crash tools (Radeon GPU
+// Detective, RenderDoc) only on request: formatting a label for every draw costs measurable CPU
+// in busy scenes. KYTY_GPU_LABELS=1 or the graphics debug dump enables them.
+[[nodiscard]] inline bool GpuDebugLabelsEnabled() noexcept {
+	static const bool requested = [] {
+		const char* value = std::getenv("KYTY_GPU_LABELS");
+		return (value != nullptr && value[0] == '1' && value[1] == '\0') ||
+		       Config::GraphicsDebugDumpEnabled();
+	}();
+	return requested && VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginDebugUtilsLabelEXT != nullptr;
+}
+
+class VulkanDebugLabelScope {
+public:
+	VulkanDebugLabelScope(vk::CommandBuffer command, const char* name): m_command(command) {
+		if (command == nullptr || name == nullptr ||
+		    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginDebugUtilsLabelEXT == nullptr ||
+		    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdEndDebugUtilsLabelEXT == nullptr) {
+			return;
+		}
+		vk::DebugUtilsLabelEXT label {};
+		label.pLabelName = name;
+		command.beginDebugUtilsLabelEXT(&label);
+		m_active = true;
+	}
+
+	~VulkanDebugLabelScope() {
+		if (m_active) {
+			m_command.endDebugUtilsLabelEXT();
+		}
+	}
+
+	VulkanDebugLabelScope(const VulkanDebugLabelScope&)            = delete;
+	VulkanDebugLabelScope& operator=(const VulkanDebugLabelScope&) = delete;
+
+private:
+	vk::CommandBuffer m_command = nullptr;
+	bool              m_active  = false;
+};
 
 template <typename Handle, typename... Args>
 void SetVulkanObjectNameF(vk::Device device, Handle handle, fmt::format_string<Args...> format,
@@ -38,7 +81,6 @@ void SetVulkanObjectNameF(vk::Device device, Handle handle, fmt::format_string<A
 
 	const auto                      name = fmt::format(format, std::forward<Args>(args)...);
 	vk::DebugUtilsObjectNameInfoEXT info {};
-	info.sType        = vk::StructureType::eDebugUtilsObjectNameInfoEXT;
 	info.objectType   = Handle::objectType;
 	info.objectHandle = static_cast<uint64_t>(
 	    reinterpret_cast<uintptr_t>(static_cast<typename Handle::CType>(handle)));

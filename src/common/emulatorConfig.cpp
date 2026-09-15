@@ -43,6 +43,10 @@ int32_t GetUserId() {
 	return g_config->user_id;
 }
 
+const std::string& GetAudioInputDevice() {
+	return g_config->audio_input_device;
+}
+
 PresentMode GetPresentMode() {
 	return g_config->present_mode;
 }
@@ -53,6 +57,10 @@ int32_t GetGpuIndex() {
 
 bool FullscreenEnabled() {
 	return g_config->fullscreen_enabled;
+}
+
+bool VrEnabled() {
+	return g_config->vr_enabled;
 }
 
 uint32_t GetVblankFrequency() {
@@ -71,11 +79,15 @@ bool ShaderValidationEnabled() {
 	return g_config->shader_validation_enabled;
 }
 
+bool PreGenEnabled() {
+	return g_config->pre_gen_enabled;
+}
+
 ShaderOptimizationType GetShaderOptimizationType() {
 	return g_config->shader_optimization_type;
 }
 
-ShaderLogDirection GetShaderLogDirection() {
+LogDirection GetShaderLogDirection() {
 	return g_config->shader_log_direction;
 }
 
@@ -95,7 +107,7 @@ bool GraphicsDebugDumpEnabled() {
 	return g_config->graphics_debug_dump_enabled;
 }
 
-OutputDirection GetPrintfDirection() {
+LogDirection GetPrintfDirection() {
 	return g_config->printf_direction;
 }
 
@@ -103,8 +115,8 @@ std::filesystem::path GetPrintfOutputFile() {
 	return g_config->printf_output_file;
 }
 
-ProfilerDirection GetProfilerDirection() {
-	return g_config->profiler_direction;
+bool ProfilerEnabled() {
+	return g_config->profiler_enabled;
 }
 
 bool SpirvDebugPrintfEnabled() {

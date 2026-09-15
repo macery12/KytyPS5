@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
 #include <map>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -63,12 +64,12 @@ public:
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t address, uint64_t size);
 
 	[[nodiscard]] bool IsMeta(uint64_t address);
-	[[nodiscard]] bool IsMetaCleared(uint64_t address, uint32_t slice,
-	                                 uint32_t* fill_value = nullptr);
+	[[nodiscard]] bool IsMetaCleared(uint64_t address, uint32_t slice);
 	[[nodiscard]] bool ClearMeta(uint64_t address);
-	// Record deferred DCC state while the original guest dispatch writes the metadata.
-	void               TrackDccFill(uint64_t address, uint64_t size, uint32_t fill_value);
 	[[nodiscard]] bool TouchMeta(uint64_t address, uint32_t slice, bool is_clear);
+	// Record a uniform compute fill the guest dispatch still writes. A render target whose CMask
+	// is this allocation consumes it as a fast clear.
+	void               TrackCmaskFill(uint64_t address, uint64_t size, uint32_t fill_value);
 
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void ProcessDownloadImages();
@@ -76,21 +77,22 @@ public:
 
 private:
 	enum class TransferDirection { Upload, Download };
-	struct TextureTransferPlan;
-	struct DownloadPlan;
+	struct TextureTransfer;
+	struct ImageDownload;
 
 	struct MetaDataInfo {
-		// A guest metadata-fill dispatch may initialize DCC before its render target is bound.
-		// PendingDcc retains that exact fill until an image binding classifies the address,
-		// without exposing an unconfirmed buffer address to the normal metadata heuristics.
-		// Keep all surface metadata in one entry so CMask/FMask can be
-		// registered beside HTile and DCC without introducing parallel tracking paths.
-		enum class Type : uint8_t { PendingDcc, CMask, FMask, HTile, Dcc };
+		enum class Type : uint8_t { CMask, FMask, HTile };
 
-		Type     type       = Type::PendingDcc;
-		uint32_t clear_mask = 0;
+		Type     type;
+		uint32_t clear_mask = UINT32_MAX;
+	};
+
+	// A compute fill of a CMask allocation, kept until a render target using it consumes the
+	// cleared layers. Each new fill re-arms every layer.
+	struct CmaskFill {
 		uint32_t fill_value = 0xffffffffu;
 		uint64_t fill_size  = 0;
+		uint32_t clear_mask = 0;
 	};
 
 	struct OverlapResult {
@@ -101,6 +103,23 @@ private:
 
 	using ImageIds       = InlinePageOwnerList<ImageId, 16>;
 	using ImagePageTable = MultiLevelPageTable<ImageIds, 20, 40, 10>;
+
+	// Callers have validated the nonempty 40-bit range with TryGetPageRange.
+	template <typename Func>
+	static void ForEachPage(uint64_t address, size_t size, Func&& func) {
+		using FuncReturn = typename std::invoke_result<Func, uint64_t>::type;
+		static constexpr bool RETURNS_BOOL = std::is_same_v<FuncReturn, bool>;
+		const uint64_t page_end = (address + size - 1) >> ImagePageTable::kPageBits;
+		for (uint64_t page = address >> ImagePageTable::kPageBits; page <= page_end; ++page) {
+			if constexpr (RETURNS_BOOL) {
+				if (func(page)) {
+					break;
+				}
+			} else {
+				func(page);
+			}
+		}
+	}
 
 	[[nodiscard]] ImageId     InsertImage(const ImageInfo& info);
 	[[nodiscard]] ImageId     GetNullImage(const ImageDesc& desc);
@@ -131,19 +150,21 @@ private:
 	                                                ImageId cached);
 	[[nodiscard]] ImageId       ExpandImage(const ImageInfo& info, ImageId source);
 	void                        RefreshImage(ImageId id);
-	void                        PrepareDccClear(ImageId id, const ImageDesc& desc);
+	void                        MaterializeDccClear(ImageId id, const ImageDesc& desc,
+	                                                uint32_t metadata_base_layer);
+	void                        PrepareCmaskClear(ImageId id, const ImageDesc& desc);
 	void                        InitializeImage(ImageId id);
-	[[nodiscard]] TextureTransferPlan
+	[[nodiscard]] TextureTransfer
 	BuildTextureTransfer(const Image& image, BindingType binding, TransferDirection direction) const;
-	[[nodiscard]] DownloadPlan BuildDownload(const Image& image) const;
+	[[nodiscard]] ImageDownload BuildDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
-	void DownloadImageData(Image& image, Buffer& destination, uint64_t destination_offset,
-	                       uint64_t destination_size, DownloadPlan plan);
+	void DownloadImage(Image& image, Buffer& destination, uint64_t destination_offset,
+	                       uint64_t destination_size, ImageDownload transfer);
 	void DownloadDepth(Image& image, Buffer& destination, uint64_t destination_offset);
 	void CommitGpuWrite(Image& image);
 	// Caller holds m_lock. Volume layer ranges select depth slices.
-	void ClearImage(CommandBuffer& command, ImageId id, const vk::ImageSubresourceRange& range,
-	                const vk::ClearValue& clear);
+	void ClearImage(CommandBuffer& command, ImageId id, vk::Format format,
+	                const vk::ImageSubresourceRange& range, const vk::ClearValue& clear);
 	void PrepareImageCopy(Image& image);
 	void RefreshCopySource(ImageId id);
 	[[nodiscard]] bool CopyD16(Image& destination, Image& source);
@@ -153,7 +174,7 @@ private:
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
-	[[nodiscard]] bool TryDownloadImage(ImageId id);
+	[[nodiscard]] bool DownloadImageMemory(ImageId id);
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -168,6 +189,7 @@ private:
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
+	std::map<uint64_t, CmaskFill>                     m_cmask_fills;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t                                          m_trigger_gc_memory  = 0;
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;

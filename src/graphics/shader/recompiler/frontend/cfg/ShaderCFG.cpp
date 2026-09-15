@@ -1109,6 +1109,31 @@ bool IsInsideLoopConstruct(const Graph& graph, const NaturalLoop& loop, uint32_t
 	       graph.Dominates(loop.header, block_id) && !graph.Dominates(loop.merge, block_id);
 }
 
+bool IsLoopControlExit(const Graph& graph, const NaturalLoop& loop, uint32_t block_id) {
+	// Branching to a loop's continue or merge target is a structured continue or break, legal
+	// from any depth inside the body, so it is an exit from a selection rather than a member
+	// of it. AGC routes these through an empty gateway block, so follow a chain of empty
+	// single-successor blocks before deciding.
+	//
+	// Only a block that exists solely to forward this edge may be followed. A block several
+	// arms branch to is a join in its own right and has to become somebody's merge block;
+	// reading it as a continue hands the selection a merge that sits above the join, and the
+	// result passes structurization but fails SPIR-V validation.
+	auto current = block_id;
+	for (size_t step = 0; step <= graph.blocks.size(); step++) {
+		if (current == loop.continue_block || current == loop.merge) {
+			return true;
+		}
+		const auto* block = graph.FindBlock(current);
+		if (block == nullptr || block->inst_begin != block->inst_end ||
+		    block->successors.size() != 1u || block->predecessors.size() != 1u) {
+			return false;
+		}
+		current = block->successors.front();
+	}
+	return false;
+}
+
 bool IsLoopControlGateway(const Graph& graph, const NaturalLoop& loop, uint32_t block_id) {
 	const auto* block = graph.FindBlock(block_id);
 	if (block == nullptr || block->terminator.kind != TerminatorKind::ConditionalBranch) {
@@ -1180,6 +1205,94 @@ bool CanReachBefore(const Graph& graph, uint32_t start, uint32_t target, uint32_
 	return false;
 }
 
+std::vector<uint32_t> ReachableBlocks(const Graph& graph, uint32_t start) {
+	std::vector<uint32_t> reachable;
+	std::vector<uint32_t> pending = {start};
+	while (!pending.empty()) {
+		const auto block_id = pending.back();
+		pending.pop_back();
+		const auto* block = graph.FindBlock(block_id);
+		if (block == nullptr || Contains(reachable, block_id)) {
+			continue;
+		}
+		AddUnique(reachable, block_id);
+		pending.insert(pending.end(), block->successors.begin(), block->successors.end());
+	}
+	SortUnique(reachable);
+	return reachable;
+}
+
+bool ContinuesToOrLeaves(const Graph& graph, uint32_t start, uint32_t target) {
+	// Every path from `start` either joins `target` or leaves the program through a return.
+	// SPIR-V lets a structured construct be exited early by a return, so an optional early
+	// exit does not stop `target` from being where the continuing paths rejoin.
+	std::vector<uint32_t> pending = {start};
+	std::vector<bool>     visited(graph.blocks.size(), false);
+	while (!pending.empty()) {
+		const auto block_id = pending.back();
+		pending.pop_back();
+		if (block_id == target || block_id >= visited.size() || visited[block_id]) {
+			continue;
+		}
+		visited[block_id] = true;
+		const auto* block = graph.FindBlock(block_id);
+		if (block == nullptr) {
+			return false;
+		}
+		if (block->successors.empty()) {
+			if (block->terminator.kind != TerminatorKind::Return) {
+				return false;
+			}
+			continue;
+		}
+		pending.insert(pending.end(), block->successors.begin(), block->successors.end());
+	}
+	return true;
+}
+
+uint32_t FindContinuingJoin(const Graph& graph, const BasicBlock& header) {
+	// An early return destroys post-dominance: an arm that can exit through one shares no
+	// post-dominator with its sibling even when the two plainly rejoin further down. Look for
+	// the first block both arms reach, counting a path that leaves through a return as met.
+	const auto true_target  = header.terminator.true_block;
+	const auto false_target = header.terminator.false_block;
+	const auto candidates   = IntersectSorted(ReachableBlocks(graph, true_target),
+	                                          ReachableBlocks(graph, false_target));
+	for (const auto candidate: candidates) {
+		if (candidate == header.id) {
+			continue;
+		}
+		if (ContinuesToOrLeaves(graph, true_target, candidate) &&
+		    ContinuesToOrLeaves(graph, false_target, candidate)) {
+			return candidate;
+		}
+	}
+	return UINT32_MAX;
+}
+
+std::vector<uint32_t> SelectionRegion(const Graph& graph, const BasicBlock& header,
+                                      uint32_t merge);
+
+bool SelectionRegionIsClosable(const Graph& graph, const BasicBlock& header, uint32_t merge) {
+	// A merge candidate is only usable when the selection it implies can be nested. Any region
+	// block entered from outside the selection breaks that, unless it is a shared terminal
+	// return, which can be given the selection its own private copy.
+	const auto region = SelectionRegion(graph, header, merge);
+	return std::ranges::all_of(region, [&](uint32_t member) {
+		const auto* member_block = graph.FindBlock(member);
+		if (member_block == nullptr) {
+			return false;
+		}
+		const bool externally_entered =
+		    std::ranges::any_of(member_block->predecessors, [&](uint32_t predecessor) {
+			    return predecessor != header.id && !Contains(region, predecessor);
+		    });
+		return !externally_entered ||
+		       (member_block->terminator.kind == TerminatorKind::Return &&
+		        member_block->successors.empty());
+	});
+}
+
 uint32_t FindSelectionMerge(const Graph& graph, const BasicBlock& block) {
 	const auto  global_merge = graph.FindNearestCommonPostDominator(block.terminator.true_block,
 	                                                                block.terminator.false_block);
@@ -1194,15 +1307,23 @@ uint32_t FindSelectionMerge(const Graph& graph, const BasicBlock& block) {
 			const bool true_reaches_false =
 			    CanReachBefore(graph, true_target, false_target, global_merge);
 			if (false_reaches_true != true_reaches_false) {
-				return false_reaches_true ? true_target : false_target;
+				const auto candidate = false_reaches_true ? true_target : false_target;
+				// Reachability alone does not make a valid merge: the selection it implies also has
+				// to be nestable. Rejecting a candidate whose region is entered from outside keeps a
+				// shared shader epilogue from swallowing unrelated control flow.
+				if (SelectionRegionIsClosable(graph, block, candidate)) {
+					return candidate;
+				}
 			}
 			if (global_merge == UINT32_MAX) {
 				// An enclosing selection's shared return needs its own inner merge
 				// gateway; the other arm can return directly without joining live state.
-				if (IsEnclosingLinearExit(graph, block.id, true_target)) {
+				if (IsEnclosingLinearExit(graph, block.id, true_target) &&
+				    SelectionRegionIsClosable(graph, block, true_target)) {
 					return true_target;
 				}
-				if (IsEnclosingLinearExit(graph, block.id, false_target)) {
+				if (IsEnclosingLinearExit(graph, block.id, false_target) &&
+				    SelectionRegionIsClosable(graph, block, false_target)) {
 					return false_target;
 				}
 				// A return can leave a selection without reaching its merge. Keep the
@@ -1214,6 +1335,26 @@ uint32_t FindSelectionMerge(const Graph& graph, const BasicBlock& block) {
 				if (graph.Dominates(block.id, true_target) &&
 				    HasLinearPathToTerminal(graph, false_target)) {
 					return true_target;
+				}
+				// The continuing arm does not have to be dominated by the header. A sibling block
+				// flowing into it only makes the merge shared, which the shared-merge splitter
+				// resolves by giving this construct its own gateway. Requiring dominance here
+				// rejects an otherwise valid merge and forces the dispatcher instead.
+				if (HasLinearPathToTerminal(graph, true_target) &&
+				    SelectionRegionIsClosable(graph, block, false_target)) {
+					return false_target;
+				}
+				if (HasLinearPathToTerminal(graph, false_target) &&
+				    SelectionRegionIsClosable(graph, block, true_target)) {
+					return true_target;
+				}
+				// Both arms can rejoin without sharing a post-dominator when one of them has an
+				// early return. Fall back to the first block both arms reach, counting a path that
+				// leaves through a return as satisfied.
+				const auto continuing_join = FindContinuingJoin(graph, block);
+				if (continuing_join != UINT32_MAX &&
+				    SelectionRegionIsClosable(graph, block, continuing_join)) {
+					return continuing_join;
 				}
 			}
 		}
@@ -1233,6 +1374,14 @@ uint32_t FindSelectionMerge(const Graph& graph, const BasicBlock& block) {
 	    graph.Dominates(block.id, false_target) &&
 	    IsInsideLoopConstruct(graph, *loop, true_target)) {
 		return false_target;
+	}
+	// A continue or break leaves the selection exactly the way a return does: that arm never
+	// reaches a merge, so the selection joins on the arm that carries on.
+	if (IsLoopControlExit(graph, *loop, true_target) && graph.Dominates(block.id, false_target)) {
+		return false_target;
+	}
+	if (IsLoopControlExit(graph, *loop, false_target) && graph.Dominates(block.id, true_target)) {
+		return true_target;
 	}
 	return global_merge;
 }
@@ -1440,7 +1589,7 @@ std::vector<uint32_t> SelectionRegion(const Graph& graph, const BasicBlock& head
 		const auto block_id = pending.back();
 		pending.pop_back();
 		if (block_id == merge || Contains(region, block_id) ||
-		    (loop != nullptr && (block_id == loop->merge || block_id == loop->continue_block))) {
+		    (loop != nullptr && IsLoopControlExit(graph, *loop, block_id))) {
 			continue;
 		}
 		const auto* block = graph.FindBlock(block_id);
@@ -1456,7 +1605,64 @@ std::vector<uint32_t> SelectionRegion(const Graph& graph, const BasicBlock& head
 	return region;
 }
 
-bool SplitOneSelectionMerge(Graph& graph) {
+bool CloneSharedTerminalForSelectionEdge(Graph& graph, uint32_t source, uint32_t target) {
+	const auto* source_block   = graph.FindBlock(source);
+	const auto* terminal_block = graph.FindBlock(target);
+	if (source_block == nullptr || terminal_block == nullptr ||
+	    terminal_block->terminator.kind != TerminatorKind::Return ||
+	    !terminal_block->successors.empty() || terminal_block->predecessors.size() < 2u ||
+	    !Contains(source_block->successors, target)) {
+		return false;
+	}
+
+	// A direct return is safe to duplicate: only the selected copy executes, and it
+	// has no successors or phi edges whose meaning could change. This keeps a shared
+	// shader epilogue inside the selection that branches to it without cloning an
+	// arbitrary externally entered region.
+	BasicBlock clone       = *terminal_block;
+	clone.id               = static_cast<uint32_t>(graph.blocks.size());
+	clone.predecessors     = {source};
+	clone.dominators.clear();
+	clone.post_dominators.clear();
+	const auto clone_id = clone.id;
+	graph.blocks.push_back(std::move(clone));
+
+	auto* mutable_source = graph.FindBlock(source);
+	if (mutable_source == nullptr) {
+		return false;
+	}
+	ReplaceValue(mutable_source->successors, target, clone_id);
+	ReplaceTerminatorTarget(mutable_source->terminator, target, clone_id);
+	return true;
+}
+
+bool CloneSharedTerminalForSelection(Graph& graph, uint32_t header,
+                                     const std::vector<uint32_t>& region, uint32_t target) {
+	const auto* terminal_block = graph.FindBlock(target);
+	if (terminal_block == nullptr || terminal_block->terminator.kind != TerminatorKind::Return ||
+	    !terminal_block->successors.empty() || terminal_block->predecessors.size() < 2u) {
+		return false;
+	}
+
+	// The external entry can arrive at the shared epilogue from the header itself or from any
+	// block already inside the selection. Give every one of those edges a private copy so the
+	// region closes, and leave the original for the predecessors outside it.
+	const auto sources   = terminal_block->predecessors;
+	auto       remaining = sources.size();
+	bool       cloned    = false;
+	for (const auto source: sources) {
+		if (remaining < 2u || (source != header && !Contains(region, source))) {
+			continue;
+		}
+		if (CloneSharedTerminalForSelectionEdge(graph, source, target)) {
+			remaining--;
+			cloned = true;
+		}
+	}
+	return cloned;
+}
+
+bool SplitOneSelectionMerge(Graph& graph, bool allow_terminal_cloning) {
 	std::vector<uint32_t> loop_headers;
 	loop_headers.reserve(graph.natural_loops.size());
 	for (const auto& loop: graph.natural_loops) {
@@ -1500,10 +1706,14 @@ bool SplitOneSelectionMerge(Graph& graph) {
 			       });
 		});
 		if (external != region.end()) {
+			if (allow_terminal_cloning &&
+			    CloneSharedTerminalForSelection(graph, block_id, region, *external)) {
+				return true;
+			}
 			SetFailure(
 			    graph, FailureKind::StructuredControlFlow, block_id,
 			    fmt::format("selection header block {} has externally entered region block {}; "
-			                "semantic block cloning is disabled",
+			                "semantic nonterminal block cloning is disabled",
 			                block_id, *external));
 			return false;
 		}
@@ -1516,11 +1726,11 @@ bool SplitOneSelectionMerge(Graph& graph) {
 	return false;
 }
 
-bool SplitSharedMergeBlocks(Graph& graph) {
+bool SplitSharedMergeBlocks(Graph& graph, bool allow_terminal_cloning) {
 	const auto original_block_count = static_cast<uint32_t>(graph.blocks.size());
 	const auto split_budget         = std::max<uint32_t>(16u, original_block_count * 4u);
 	for (uint32_t splits = 0; splits < split_budget; splits++) {
-		if (!SplitOneLoopMerge(graph) && !SplitOneSelectionMerge(graph)) {
+		if (!SplitOneLoopMerge(graph) && !SplitOneSelectionMerge(graph, allow_terminal_cloning)) {
 			return !graph.unsupported;
 		}
 		RebuildPredecessors(graph);
@@ -2109,7 +2319,7 @@ Graph BuildGraph(const Decoder::Program& program) {
 
 namespace {
 
-bool StructurizeImpl(Graph& graph) {
+bool StructurizeImpl(Graph& graph, bool allow_terminal_cloning) {
 	if (graph.unsupported || graph.irreducible) {
 		if (graph.unsupported_reason.empty()) {
 			graph.unsupported_reason = "unsupported CFG";
@@ -2120,7 +2330,7 @@ bool StructurizeImpl(Graph& graph) {
 	if (!CanonicalizeNaturalLoops(graph)) {
 		return false;
 	}
-	if (!SplitSharedMergeBlocks(graph)) {
+	if (!SplitSharedMergeBlocks(graph, allow_terminal_cloning)) {
 		return false;
 	}
 	if (!IsolateSemanticLoopHeaders(graph)) {
@@ -2193,27 +2403,46 @@ bool StructurizeImpl(Graph& graph) {
 } // namespace
 
 bool Structurize(Graph& graph) {
-	Graph original = graph;
-	if (StructurizeImpl(graph)) {
+	Graph structured = graph;
+	if (StructurizeImpl(structured, false)) {
+		graph = std::move(structured);
 		return true;
 	}
-
-	Graph failed_graph      = std::move(graph);
-	graph                   = std::move(original);
+	Graph first_failed = std::move(structured);
+	Graph routed = graph;
 	const auto route_budget = static_cast<uint32_t>(graph.blocks.size());
 	// Apply one route at a time and retry. Eagerly routing every matching diamond can
 	// rewrite unrelated selections that were already structurally valid.
 	for (uint32_t route_variable = 0; route_variable < route_budget; route_variable++) {
-		if (!RouteSharedSelectionArm(graph, route_variable)) {
+		if (!RouteSharedSelectionArm(routed, route_variable)) {
 			break;
 		}
-		Graph routed = graph;
-		if (StructurizeImpl(routed)) {
-			graph = std::move(routed);
+		structured = routed;
+		if (StructurizeImpl(structured, false)) {
+			graph = std::move(structured);
 			return true;
 		}
 	}
-	graph = std::move(failed_graph);
+
+	// Cloning a shared terminal return is the last resort before the dispatcher.
+	Graph cloned = graph;
+	if (StructurizeImpl(cloned, true)) {
+		graph = std::move(cloned);
+		return true;
+	}
+
+	const Graph& diagnostic =
+	    cloned.unsupported_reason.empty() ? first_failed : cloned;
+	// Structurization may insert and renumber blocks. Report a source block when possible,
+	// while leaving the original graph intact for the dispatcher fallback.
+	const auto* failed = diagnostic.FindBlock(diagnostic.failure_block);
+	const auto original = std::ranges::find_if(graph.blocks, [&](const BasicBlock& block) {
+		return failed != nullptr && failed->inst_begin != failed->inst_end &&
+		       block.inst_begin == failed->inst_begin && block.inst_end == failed->inst_end &&
+		       block.start_pc == failed->start_pc && block.end_pc == failed->end_pc;
+	});
+	const auto failure_block = original != graph.blocks.end() ? original->id : UINT32_MAX;
+	SetFailure(graph, diagnostic.failure_kind, failure_block, diagnostic.unsupported_reason);
 	return false;
 }
 

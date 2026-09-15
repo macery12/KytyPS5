@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <xxhash.h>
 
@@ -586,6 +587,14 @@ void Validate(const ImageInfo& info) {
 	    info.bytes_per_block == 0 || (info.data.address != 0 && info.pitch == 0)) {
 		EXIT("invalid image geometry or format\n");
 	}
+	const auto max_levels = std::bit_width(std::max({info.extent.width, info.extent.height,
+	                                                info.extent.depth}));
+	if (info.resources.levels > max_levels) {
+		EXIT("image mip count exceeds extent: %ux%ux%u levels=%u max=%u addr=0x%016" PRIx64
+		     "\n",
+		     info.extent.width, info.extent.height, info.extent.depth, info.resources.levels,
+		     max_levels, info.data.address);
+	}
 
 	switch (info.type) {
 		case Prospero::ImageType::kColor1D:
@@ -672,6 +681,23 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	create.initialLayout = vk::ImageLayout::eUndefined;
 	create.usage         = ImageUsageFlags(graphics, info);
 	create.samples       = vulkan_sample_count(info.samples);
+	const auto supports = [&](vk::ImageUsageFlags usage, vk::ImageCreateFlags flags) {
+		vk::ImageFormatProperties properties {};
+		return graphics.GetImageFormatProperties(create.format, create.imageType, create.tiling,
+		                                         usage, flags, &properties) == vk::Result::eSuccess &&
+		       static_cast<bool>(properties.sampleCounts & create.samples);
+	};
+	if (info.IsBlock() && (create.flags & vk::ImageCreateFlagBits::eBlockTexelViewCompatible)) {
+		// The startup BC1 sampled-image probe cannot establish support for another BC format
+		// with transfer and storage usage. Probe the exact image before enabling storage views.
+		const auto storage_usage = create.usage | vk::ImageUsageFlagBits::eStorage;
+		if (supports(storage_usage, create.flags)) {
+			create.usage = storage_usage;
+		} else if (!supports(create.usage, create.flags)) {
+			// Block-compatible views are optional for ordinary compressed sampling.
+			create.flags &= ~vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
+		}
+	}
 
 	vk::ImageFormatProperties properties {};
 	if (graphics.GetImageFormatProperties(create.format, create.imageType, create.tiling,
@@ -693,11 +719,12 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 }
 
 uint64_t Image::HashGuestEdges() const {
-	constexpr uint64_t                         page_mask = TRACKER_PAGE_SIZE - 1;
 	std::array<uint8_t, TRACKER_PAGE_SIZE * 2> bytes {};
 	const auto                                 range = info.data;
-	const uint64_t head_end     = std::min(range.End(), (range.address + page_mask) & ~page_mask);
-	const uint64_t tail_begin   = std::max(range.address, range.End() & ~page_mask);
+	const uint64_t head_end =
+	    std::min(range.End(), Common::AlignUp(range.address, TRACKER_PAGE_SIZE));
+	const uint64_t tail_begin =
+	    std::max(range.address, Common::AlignDown(range.End(), TRACKER_PAGE_SIZE));
 	const uint64_t head_size    = head_end - range.address;
 	const uint64_t tail_address = tail_begin < head_end ? head_end : tail_begin;
 	const uint64_t tail_size    = range.End() - tail_address;

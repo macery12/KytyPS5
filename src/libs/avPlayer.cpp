@@ -384,6 +384,16 @@ static bool codec_is_supported_for_source(AvPlayerSourceType source_type, AVMedi
 	}
 }
 
+static const AVCodec* find_decoder(AVCodecID codec_id) {
+	const auto* decoder = avcodec_find_decoder(codec_id);
+	if (decoder == nullptr && codec_id == AV_CODEC_ID_VP9) {
+		Log::WriteToConsoleAndLog(
+		    "WARNING: AvPlayer: The game requested VP9 video, but FFmpeg has no VP9 "
+		    "decoder. Use FFmpeg with VP9 decoding enabled.\n");
+	}
+	return decoder;
+}
+
 struct PacketDeleter {
 	void operator()(AVPacket* packet) const { av_packet_free(&packet); }
 };
@@ -552,6 +562,7 @@ private:
 struct ReadyFrame {
 	std::unique_ptr<GuestBuffer> buffer;
 	AvPlayerFrameInfoEx          info {};
+	uint64_t                    timestamp_offset = 0;
 };
 
 class FileStreamer {
@@ -933,6 +944,7 @@ public:
 		}
 		current_video = std::move(*frame);
 		*out          = current_video->info;
+		RecordLoopBoundary(*current_video);
 		if (deliver_seek_frame) {
 			seek_video_frame_pending = false;
 		}
@@ -963,11 +975,25 @@ public:
 		std::memcpy(out->details.audio.language_code,
 		            current_audio->info.details.audio.language_code, 4);
 		last_audio_ts = out->time_stamp;
+		RecordLoopBoundary(*current_audio);
 		return true;
 	}
-	std::optional<int32_t> TakeWarning() { return warnings.TryPop(); }
+	std::optional<int32_t> TakeWarning() {
+		std::lock_guard lock(mutex);
+		if (pending_loop_warnings == 0) {
+			return std::nullopt;
+		}
+		--pending_loop_warnings;
+		return AVPLAYER_WARNING_LOOPING_BACK;
+	}
 
 private:
+	void RecordLoopBoundary(const ReadyFrame& frame) {
+		if (frame.timestamp_offset > last_output_loop_offset) {
+			last_output_loop_offset = frame.timestamp_offset;
+			++pending_loop_warnings;
+		}
+	}
 	void Close() {
 		Stop();
 		if (fmt != nullptr) {
@@ -1014,6 +1040,8 @@ private:
 		audio_done               = true;
 		seek_video_frame_pending = false;
 		last_audio_ts            = 0;
+		last_output_loop_offset  = 0;
+		pending_loop_warnings    = 0;
 		current_video            = std::move(delivered_video);
 		current_audio            = std::move(delivered_audio);
 		retired_video            = std::move(in_flight_video);
@@ -1046,7 +1074,7 @@ private:
 			     static_cast<int>(s->codecpar->codec_id), static_cast<uint32_t>(source_type));
 			return false;
 		}
-		if (avcodec_find_decoder(s->codecpar->codec_id) == nullptr) {
+		if (find_decoder(s->codecpar->codec_id) == nullptr) {
 			LOGF("\t decoder not found: stream=%d codec=%d\n", id,
 			     static_cast<int>(s->codecpar->codec_id));
 			return false;
@@ -1055,7 +1083,7 @@ private:
 	}
 	bool OpenCodec(int id, AVCodecContext** out) {
 		auto* s   = fmt->streams[id];
-		auto* dec = avcodec_find_decoder(s->codecpar->codec_id);
+		auto* dec = find_decoder(s->codecpar->codec_id);
 		if (dec == nullptr) {
 			LOGF("\t avcodec_find_decoder failed: stream=%d codec=%d\n", id,
 			     static_cast<int>(s->codecpar->codec_id));
@@ -1220,7 +1248,6 @@ private:
 					if (avformat_seek_file(fmt, stream, INT64_MIN, 0, INT64_MAX, 0) < 0) {
 						break;
 					}
-					warnings.Push(AVPLAYER_WARNING_LOOPING_BACK);
 					continue;
 				}
 				if (result != AVERROR_EOF && !worker_stop) {
@@ -1340,6 +1367,7 @@ private:
 				return false;
 			}
 			ready.info.time_stamp += timestamp_offset;
+			ready.timestamp_offset = timestamp_offset;
 			frames.Push(std::move(ready));
 			av_frame_free(&frame);
 		}
@@ -1603,7 +1631,6 @@ private:
 	std::optional<ReadyFrame>                current_video;
 	std::optional<ReadyFrame>                current_audio;
 	std::deque<std::unique_ptr<GuestBuffer>> retired_video;
-	WorkQueue<int32_t>                       warnings;
 	LibKernel::Pthread                       demux_thread = nullptr;
 	LibKernel::Pthread                       video_thread = nullptr;
 	LibKernel::Pthread                       audio_thread = nullptr;
@@ -1623,6 +1650,8 @@ private:
 	uint32_t                                 sync_mode     = 0;
 	uint64_t                                 start_time_ms = 0;
 	uint64_t                                 last_audio_ts = 0;
+	uint64_t                                 last_output_loop_offset = 0;
+	uint32_t                                 pending_loop_warnings   = 0;
 	std::chrono::steady_clock::time_point    clock_start {};
 	std::chrono::steady_clock::time_point    pause_time {};
 	std::chrono::steady_clock::duration      paused_extra {};
@@ -1951,6 +1980,7 @@ Bool KYTY_SYSV_ABI AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 	video_info->details.video.height       = ex.details.video.height;
 	video_info->details.video.aspect_ratio = ex.details.video.aspect_ratio;
 	std::memcpy(video_info->details.video.language_code, ex.details.video.language_code, 4);
+	pump_warnings(h);
 	return 1;
 }
 Bool KYTY_SYSV_ABI AvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info) {

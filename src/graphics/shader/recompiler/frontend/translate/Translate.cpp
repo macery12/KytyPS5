@@ -789,15 +789,6 @@ const EmbeddedFetchLoad* FindEmbeddedFetchLoad(const EmbeddedFetchPlan* plan, ui
 	return found != plan->loads.end() ? &*found : nullptr;
 }
 
-bool IsEmbeddedFetchPrologLoad(const EmbeddedFetchPlan* plan, uint32_t pc) {
-	if (plan == nullptr) {
-		return false;
-	}
-	return std::ranges::any_of(plan->loads, [pc](const auto& load) {
-		return std::ranges::find(load.prolog_loads, pc) != load.prolog_loads.end();
-	});
-}
-
 int ResolveEmbeddedFetchResource(const ShaderVertexInputInfo& input,
                                  const EmbeddedFetchLoad&     load) {
 	if (load.attrib_id >= 0 && load.attrib_id < input.resources_num &&
@@ -817,22 +808,6 @@ int ResolveEmbeddedFetchResource(const ShaderVertexInputInfo& input,
 		}
 	}
 	return -1;
-}
-
-bool IsScalarMemoryLoad(Decoder::Opcode opcode) {
-	switch (opcode) {
-		case Decoder::Opcode::S_LOAD_DWORD:
-		case Decoder::Opcode::S_LOAD_DWORDX2:
-		case Decoder::Opcode::S_LOAD_DWORDX4:
-		case Decoder::Opcode::S_LOAD_DWORDX8:
-		case Decoder::Opcode::S_LOAD_DWORDX16:
-		case Decoder::Opcode::S_BUFFER_LOAD_DWORD:
-		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX2:
-		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX4:
-		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX8:
-		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX16: return true;
-		default: return false;
-	}
 }
 
 bool IsBufferDwordLoad(Decoder::Opcode opcode) {
@@ -898,20 +873,27 @@ void ValidateTranslateOptions(const TranslateOptions& options) {
 	if (options.wave_size != 32u && options.wave_size != 64u) {
 		EXIT("shader translation requires wave32 or wave64, got %u", options.wave_size);
 	}
+	if (options.embedded_fetch != nullptr && options.stage != ShaderType::Vertex &&
+	    options.stage != ShaderType::Local) {
+		EXIT("embedded fetch requires a vertex or local shader");
+	}
 	switch (options.stage) {
 		case ShaderType::Vertex:
+		case ShaderType::Local:
+		case ShaderType::TessellationControl:
+		case ShaderType::TessellationEvaluation:
 		case ShaderType::Mesh:
-			if (options.vertex == nullptr) {
+			if (options.input_info.vertex == nullptr) {
 				EXIT("vertex shader translation has no vertex input metadata");
 			}
 			return;
 		case ShaderType::Pixel:
-			if (options.pixel == nullptr) {
+			if (options.input_info.pixel == nullptr) {
 				EXIT("pixel shader translation has no pixel input metadata");
 			}
 			return;
 		case ShaderType::Compute:
-			if (options.compute == nullptr) {
+			if (options.input_info.compute == nullptr) {
 				EXIT("compute shader translation has no compute input metadata");
 			}
 			return;
@@ -936,10 +918,27 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 	result.shader_hash         = options.shader_hash;
 	result.user_data_base      = options.user_data_base;
 	result.user_data_count     = options.user_data_count;
-	result.scratch_dwords      = options.scratch_dwords;
-	result.dispatcher_fallback = options.dispatcher_fallback;
-	result.cfg_failure_kind    = options.cfg_failure_kind;
-	result.fallback_reason     = options.fallback_reason;
+	switch (options.stage) {
+		case ShaderType::Vertex:
+		case ShaderType::Local:
+		case ShaderType::TessellationControl:
+		case ShaderType::TessellationEvaluation:
+			result.scratch_dwords = options.input_info.vertex->scratch_size_dwords;
+			break;
+		case ShaderType::Mesh:
+			result.scratch_dwords = options.input_info.vertex->mesh.scratch_size_dwords;
+			break;
+		case ShaderType::Pixel:
+			result.scratch_dwords = options.input_info.pixel->scratch_size_dwords;
+			break;
+		case ShaderType::Compute:
+			result.scratch_dwords = options.input_info.compute->scratch_size_dwords;
+			break;
+		default: break; // ValidateTranslateOptions rejects unsupported stages.
+	}
+	result.dispatcher_fallback = cfg.irreducible || cfg.unsupported;
+	result.cfg_failure_kind    = cfg.failure_kind;
+	result.fallback_reason     = cfg.unsupported_reason;
 	if (options.embedded_fetch != nullptr) {
 		result.info.vertex_offset_sgpr   = options.embedded_fetch->vertex_offset_sgpr;
 		result.info.instance_offset_sgpr = options.embedded_fetch->instance_offset_sgpr;
@@ -1017,13 +1016,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 		}
 		auto                 initial_exec  = IR::U1(IR::Value(true));
 		uint32_t             total_threads = 0;
-		ShaderStageInputInfo stage_input {};
-		if (options.stage == ShaderType::Compute) {
-			stage_input.compute = options.compute;
-		} else {
-			stage_input.vertex = options.vertex;
-		}
-		const auto* workgroup = ShaderWorkgroupInput(options.stage, stage_input);
+		const auto*          workgroup = ShaderWorkgroupInput(options.stage, options.input_info);
 		if (workgroup != nullptr) {
 			total_threads = std::max(workgroup->threads_num[0], 1u) *
 			                std::max(workgroup->threads_num[1], 1u) *
@@ -1040,7 +1033,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 		entry_ir.SetExecHi(options.wave_size == 64u ? entry_ir.CompositeExtract(initial_mask, 1)
 		                                            : IR::U32(IR::Value(0u)));
 		if (options.stage == ShaderType::Compute) {
-			const auto* cs = options.compute;
+			const auto* cs = options.input_info.compute;
 			const auto  thread_ids =
 			    cs->thread_ids_num > 0 ? std::min<uint32_t>(cs->thread_ids_num, 3u) : 0u;
 			for (uint32_t index = 0; index < thread_ids; index++) {
@@ -1071,7 +1064,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				                       first_bit));
 			}
 		} else if (options.stage == ShaderType::Mesh) {
-			const auto& mesh = options.vertex->mesh;
+			const auto& mesh = options.input_info.vertex->mesh;
 			EXIT_NOT_IMPLEMENTED(options.wave_size != 64u || mesh.primitives_per_group == 0u ||
 			                     mesh.vertices_per_group > 64u || total_threads > 15u * 64u);
 			const auto u32  = [](uint32_t value) { return IR::U32(IR::Value(value)); };
@@ -1153,15 +1146,53 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			entry_ir.SetVectorReg(
 			    static_cast<IR::VectorReg>(8),
 			    entry_ir.IAdd(draw(2), builtin(IR::StageInputKind::WorkgroupId, 1)));
+		} else if (options.stage == ShaderType::Local) {
+			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(3), IR::U32(IR::Value(64u)));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(2),
+			                      builtin(IR::StageInputKind::VertexIndex));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(3), IR::U32(IR::Value(0u)));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(5),
+			                      builtin(IR::StageInputKind::InstanceIndex));
+		} else if (options.stage == ShaderType::TessellationControl) {
+			const auto& tess = options.input_info.vertex->tess;
+			entry_ir.SetScalarReg(
+			    static_cast<IR::ScalarReg>(2),
+			    IR::U32(entry_ir.Emit(IR::ValueOpcode::TessellationBase, {IR::Value(0u)})));
+			entry_ir.SetScalarReg(
+			    static_cast<IR::ScalarReg>(4),
+			    IR::U32(entry_ir.Emit(IR::ValueOpcode::TessellationBase, {IR::Value(1u)})));
+			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(3),
+			                      IR::U32(IR::Value(0x81010000u | tess.input_control_points |
+			                                        (tess.output_control_points << 8u))));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(0),
+			                      builtin(IR::StageInputKind::PrimitiveId));
+			entry_ir.SetVectorReg(
+			    static_cast<IR::VectorReg>(1),
+			    entry_ir.ShiftLeftLogical(builtin(IR::StageInputKind::InvocationId),
+			                              IR::U32(IR::Value(8u))));
+		} else if (options.stage == ShaderType::TessellationEvaluation) {
+			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(3), IR::U32(IR::Value(64u)));
+			entry_ir.SetScalarReg(
+			    static_cast<IR::ScalarReg>(4),
+			    IR::U32(entry_ir.Emit(IR::ValueOpcode::TessellationBase, {IR::Value(0u)})));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(5),
+			                      builtin(IR::StageInputKind::TessCoord, 0));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(6),
+			                      builtin(IR::StageInputKind::TessCoord, 1));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(7), IR::U32(IR::Value(0u)));
+			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(8),
+			                      builtin(IR::StageInputKind::PrimitiveId));
 		} else if (options.stage == ShaderType::Pixel) {
-			const auto* ps = options.pixel;
-			if (ps->ps_perspective_center_vgpr != UINT32_MAX) {
-				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(ps->ps_perspective_center_vgpr),
-				                      builtin(IR::StageInputKind::BaryCoordSmooth, 0));
-				entry_ir.SetVectorReg(
-				    static_cast<IR::VectorReg>(ps->ps_perspective_center_vgpr + 1u),
-				    builtin(IR::StageInputKind::BaryCoordSmooth, 1));
-			}
+			const auto* ps = options.input_info.pixel;
+			const auto barycentric_pair = [&](uint32_t reg, IR::StageInputKind kind) {
+				if (reg != UINT32_MAX) {
+					entry_ir.SetVectorReg(static_cast<IR::VectorReg>(reg), builtin(kind, 0));
+					entry_ir.SetVectorReg(static_cast<IR::VectorReg>(reg + 1u), builtin(kind, 1));
+				}
+			};
+			barycentric_pair(ps->ps_perspective_center_vgpr, IR::StageInputKind::BaryCoordSmooth);
+			barycentric_pair(ps->ps_perspective_centroid_vgpr,
+			                 IR::StageInputKind::BaryCoordSmoothCentroid);
 			uint32_t reg = ps->ps_system_input_base;
 			if (ps->ps_pos_x) {
 				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(reg++),
@@ -1204,25 +1235,19 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			if (IsCodeTableLoad(cfg, instruction.pc)) {
 				continue;
 			}
-			if (IsScalarMemoryLoad(instruction.opcode) &&
-			    IsEmbeddedFetchPrologLoad(options.embedded_fetch, instruction.pc)) {
-				continue;
-			}
 			const auto* embedded = FindEmbeddedFetchLoad(options.embedded_fetch, instruction.pc);
 			if (embedded != nullptr && IsBufferDwordLoad(instruction.opcode) &&
 			    instruction.data_dwords == embedded->components &&
 			    instruction.dst.kind == Decoder::OperandKind::Vgpr) {
-				if (options.vertex == nullptr) {
-					EXIT("embedded vertex fetch plan has no vertex input metadata");
-				}
-				const auto resource = ResolveEmbeddedFetchResource(*options.vertex, *embedded);
-				if (resource < 0 || resource >= options.vertex->resources_num) {
+				const auto resource =
+				    ResolveEmbeddedFetchResource(*options.input_info.vertex, *embedded);
+				if (resource < 0 || resource >= options.input_info.vertex->resources_num) {
 					EXIT("embedded vertex fetch at 0x%08x has no resource for attribute %d",
 					     instruction.pc, embedded->attrib_id);
 				}
 				translator.TranslateEmbeddedFetch(instruction, static_cast<uint32_t>(resource),
 				                                  embedded->components,
-				                                  options.vertex->resources[resource]);
+				                                  options.input_info.vertex->resources[resource]);
 				continue;
 			}
 			translator.TranslateInstruction(instruction);
