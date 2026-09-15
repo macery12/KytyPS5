@@ -22,7 +22,6 @@
 #include <array>
 #include <atomic>
 #include <cctype>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,7 +30,6 @@
 #include <limits>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
-#include <spirv-tools/optimizer.hpp>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -107,77 +105,22 @@ bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
 }
 
-uint64_t TraceComputeShaderHash() {
-	static const uint64_t hash = [] {
-		const char* value = std::getenv("KYTY_TRACE_CS_HASH");
-		if (value == nullptr) {
-			return uint64_t {0};
-		}
-		char* end = nullptr;
-		const auto parsed = std::strtoull(value, &end, 0);
-		return end != value && *end == '\0' ? static_cast<uint64_t>(parsed) : uint64_t {0};
-	}();
-	return hash;
-}
-
-uint64_t OptimizeComputeShaderHash() {
-	static const uint64_t hash = [] {
-		const char* value = std::getenv("KYTY_OPTIMIZE_CS_HASH");
-		if (value == nullptr) {
-			return uint64_t {0};
-		}
-		char* end = nullptr;
-		const auto parsed = std::strtoull(value, &end, 0);
-		return end != value && *end == '\0' ? static_cast<uint64_t>(parsed) : uint64_t {0};
-	}();
-	return hash;
-}
-
 // Writing the shaders out is what makes a recompiler problem analysable offline, and requiring
 // the graphics debug dump for it is too blunt: that costs hundreds of megabytes of log and slows
 // startup enough to change what reproduces. The shader log folder already exists for exactly this
 // output, so File direction is enough on its own.
-bool ShaderDumpEnabled(const char* stage_name, uint64_t shader_hash) {
-	if (Config::GraphicsDebugDumpEnabled() ||
-	    Config::GetShaderLogDirection() == Config::LogDirection::File) {
-		return true;
-	}
-	if (std::strcmp(stage_name, "cs") == 0 && shader_hash != 0 &&
-	    (shader_hash == TraceComputeShaderHash() ||
-	     shader_hash == OptimizeComputeShaderHash())) {
-		return true;
-	}
-	static const uint64_t traced_hash = [] {
-		const char* trace = std::getenv("KYTY_TRACE_STARTUP");
-		const char* skip  = std::getenv("KYTY_SKIP_CS_HASH");
-		if (trace == nullptr || std::strcmp(trace, "1") != 0 || skip == nullptr) {
-			return uint64_t {0};
-		}
-		char* end = nullptr;
-		const uint64_t hash = std::strtoull(skip, &end, 0);
-		return end != skip && *end == '\0' ? hash : uint64_t {0};
-	}();
-	return traced_hash != 0 && std::strcmp(stage_name, "cs") == 0 &&
-	       shader_hash == traced_hash;
-}
-
-std::filesystem::path ShaderDumpFolder() {
-	if (Config::GraphicsDebugDumpEnabled() ||
-	    Config::GetShaderLogDirection() == Config::LogDirection::File) {
-		return Config::GetShaderLogFolder();
-	}
-	static const auto folder = Config::GetShaderLogFolder() /
-	    fmt::format("startup_trace_{}", std::chrono::steady_clock::now().time_since_epoch().count());
-	return folder;
+bool ShaderDumpEnabled() {
+	return Config::GraphicsDebugDumpEnabled() ||
+	       Config::GetShaderLogDirection() == Config::LogDirection::File;
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
-	if (!ShaderDumpEnabled(stage_name, shader_hash)) {
+	if (!ShaderDumpEnabled()) {
 		return;
 	}
 	static std::atomic_int id = 0;
-	const auto path = ShaderDumpFolder() / fmt::format("{:04d}_new_shader_{}_{:016x}.spv",
+	const auto path = Config::GetShaderLogFolder() / fmt::format("{:04d}_new_shader_{}_{:016x}.spv",
 	                                                             id++, stage_name, shader_hash);
 	Common::File::CreateDirectories(path.parent_path());
 	Common::File file(path);
@@ -187,22 +130,16 @@ void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
 		return;
 	}
 	file.Write(spirv.data(), spirv.size() * sizeof(uint32_t));
-	if (Config::GetShaderLogDirection() != Config::LogDirection::File &&
-	    !Config::GraphicsDebugDumpEnabled()) {
-		std::printf("Startup trace: CS SPIR-V saved to %s\n",
-		            Common::PathToString(path).c_str());
-		std::fflush(stdout);
-	}
 }
 
 void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash,
                         std::span<const uint32_t> code, const std::string& decoded_dump) {
-	if (!ShaderDumpEnabled(stage_name, shader_hash)) {
+	if (!ShaderDumpEnabled()) {
 		return;
 	}
 	EXIT_IF(code.empty());
 	static std::atomic_int id = 0;
-	const auto base = ShaderDumpFolder() / "original" /
+	const auto base = Config::GetShaderLogFolder() / "original" /
 	                  fmt::format("{:04d}_new_shader_{}_{:016x}", id++, stage_name, shader_hash);
 	Common::File::CreateDirectories(base.parent_path());
 	for (const auto& [suffix, data, size]: {
@@ -227,10 +164,7 @@ void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash,
 
 bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
                          const std::vector<uint32_t>& spirv) {
-	const bool trace_shader = shader_hash != 0 &&
-	                          (TraceComputeShaderHash() == shader_hash ||
-	                           OptimizeComputeShaderHash() == shader_hash);
-	if (!Config::ShaderValidationEnabled() && !trace_shader) {
+	if (!Config::ShaderValidationEnabled()) {
 		return true;
 	}
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
@@ -242,17 +176,7 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 		                        message);
 	});
 	if (tools.Validate(spirv)) {
-		if (trace_shader) {
-			std::printf("Startup trace: CS hash=0x%016" PRIx64 " SPIR-V validation passed\n",
-			            shader_hash);
-			std::fflush(stdout);
-		}
 		return true;
-	}
-	if (trace_shader) {
-		std::printf("Startup trace: CS hash=0x%016" PRIx64 " SPIR-V validation failed: %s\n",
-		            shader_hash, messages.c_str());
-		std::fflush(stdout);
 	}
 	spvtools::SpirvTools disassembler(SPV_ENV_VULKAN_1_2);
 	std::string          text;
@@ -340,51 +264,6 @@ struct PipelineCache::ProgramCache {
 			     options.shader_hash);
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
-		if (options.stage == ShaderType::Compute && options.shader_hash != 0 &&
-		    options.shader_hash == OptimizeComputeShaderHash()) {
-			spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
-			optimizer.RegisterPerformancePasses(true);
-			std::vector<uint32_t> optimized;
-			if (!optimizer.Run(result.spirv.data(), result.spirv.size(), &optimized) ||
-			    optimized.empty() ||
-			    !ValidateShaderSpirv(options.dump_label, options.shader_hash, optimized)) {
-				EXIT("%s failed hash=0x%016" PRIx64 ": SPIR-V optimization failed\n",
-				     options.dump_label, options.shader_hash);
-			}
-			std::printf("Startup trace: optimized CS hash=0x%016" PRIx64
-			            " SPIR-V words=%zu -> %zu\n",
-			            options.shader_hash, result.spirv.size(), optimized.size());
-			std::fflush(stdout);
-			result.spirv = std::move(optimized);
-			DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
-		}
-		// Diagnostic only: keep the guest shader hash and descriptor layout, but allow a
-		// replacement module for the one CS selected by KYTY_TRACE_CS_HASH.
-		if (options.stage == ShaderType::Compute && options.shader_hash != 0 &&
-		    options.shader_hash == TraceComputeShaderHash()) {
-			if (const char* path = std::getenv("KYTY_OVERRIDE_TRACED_CS_SPV");
-			    path != nullptr && *path != '\0') {
-				Common::File file(std::filesystem::path(path), Common::File::Mode::Read);
-				const auto   size = file.IsInvalid() ? 0 : file.Size();
-				if (size == 0 || size > 16 * 1024 * 1024 || size % sizeof(uint32_t) != 0) {
-					EXIT("CS SPIR-V override must be a readable, word-aligned file <= 16 MiB: %s\n",
-					     path);
-				}
-				std::vector<uint32_t> replacement(size / sizeof(uint32_t));
-				uint32_t              bytes_read = 0;
-				file.Read(replacement.data(), static_cast<uint32_t>(size), &bytes_read);
-				if (bytes_read != size ||
-				    !ValidateShaderSpirv(options.dump_label, options.shader_hash, replacement)) {
-					EXIT("CS SPIR-V override read or validation failed: %s\n", path);
-				}
-				result.spirv = std::move(replacement);
-				std::printf("Startup trace: CS hash=0x%016" PRIx64
-				            " using SPIR-V override %s (%zu words)\n",
-				            options.shader_hash, path, result.spirv.size());
-				std::fflush(stdout);
-				DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
-			}
-		}
 
 		const auto module = CompileSPV(result.spirv, device);
 		EXIT_IF(module == nullptr);
@@ -468,13 +347,8 @@ struct PipelineCache::ProgramCache {
 		options.shader_hash = params.hash;
 		options.user_data   = params.user_data;
 		options.back_code      = params.back_code;
-		const bool shader_log_enabled =
-		    Config::GetShaderLogDirection() != Config::LogDirection::Silent;
-		const bool trace_compute_shader =
-		    stage == ShaderType::Compute && params.hash != 0 &&
-		    (TraceComputeShaderHash() == params.hash || OptimizeComputeShaderHash() == params.hash);
-		options.dump_ir     = shader_log_enabled || trace_compute_shader;
-		options.early_dump  = shader_log_enabled;
+		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		options.early_dump  = options.dump_ir;
 		options.dump_label  = label;
 		options.input_info  = stage_input;
 

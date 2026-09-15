@@ -11,13 +11,9 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
-#include "graphics/presentation/window.h"
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
-#include <atomic>
-#include <cstdio>
-#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -715,37 +711,6 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	auto&             image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
-	}
-	static const uint64_t ui_trace_start = [] {
-		const char* value = std::getenv("KYTY_TRACE_UI");
-		if (value == nullptr || *value == '\0') return UINT64_MAX;
-		char* end = nullptr;
-		const uint64_t frame = std::strtoull(value, &end, 10);
-		return end != value && *end == '\0' && frame != 0 ? frame : UINT64_MAX;
-	}();
-	if (ui_trace_start != UINT64_MAX) {
-		const auto frame = WindowGetPresentedFrameNum();
-		if (frame >= ui_trace_start) {
-			static std::atomic<uint32_t> logged {0};
-			if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
-				std::printf("UI trace: present frame=%llu source=0x%llx %ux%u"
-				            " resolved=0x%llx %ux%u requested_format=%u cached_format=%u"
-				            " compression=%u render_target=%u storage=%u"
-				            " gpu_dirty=%u buffer_dirty=%u cpu_dirty=%u\n",
-				            static_cast<unsigned long long>(frame),
-				            static_cast<unsigned long long>(info.data.address), info.extent.width,
-				            info.extent.height,
-				            static_cast<unsigned long long>(image.info.data.address),
-				            image.backing.extent.width, image.backing.extent.height,
-				            static_cast<uint32_t>(info.pixel_format),
-				            static_cast<uint32_t>(image.backing.format),
-				            static_cast<uint32_t>(info.metadata.compression),
-				            image.usage.render_target ? 1u : 0u, image.usage.storage ? 1u : 0u,
-				            image.IsGpuModified() ? 1u : 0u,
-				            image.IsBufferModified() ? 1u : 0u, image.IsCpuDirty() ? 1u : 0u);
-				std::fflush(stdout);
-			}
-		}
 	}
 
 	auto frame_format = info.pixel_format;

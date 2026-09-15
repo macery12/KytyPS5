@@ -305,39 +305,7 @@ void TextureCache::RegisterImage(ImageId id) {
 		EXIT("TextureCache: image registration is outside the guest address space\n");
 	}
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
-		auto& owners = m_image_page_table[page];
-		owners.push_back(id);
-		// Every tracked owner adds one write watcher to its pages, and PageManager caps a page at
-		// 127. Report who crowds a page before that fatal so leaked duplicates can be identified.
-		if (owners.size() != 96 && owners.size() != 120) {
-			return;
-		}
-		std::printf("TextureCache: page 0x%010llx has %zu image owners (tick=%llu):\n",
-		            static_cast<unsigned long long>(page << ImagePageTable::kPageBits),
-		            owners.size(), static_cast<unsigned long long>(m_gc_tick));
-		owners.ForEach([this](ImageId owner_id) {
-			const auto* owner = m_slot_images.try_get(owner_id);
-			if (owner == nullptr) {
-				std::printf("  id=%u:%u missing\n", owner_id.index, owner_id.generation);
-				return;
-			}
-			std::printf("  id=%u:%u addr=0x%010llx size=0x%llx fmt=%d guest=%u type=%u %ux%ux%u "
-			            "levels=%u layers=%u samples=%u tile=%u assoc=%d rebind=%d tracked=%d "
-			            "rt=%d gpu=%d last=%llu\n",
-			            owner_id.index, owner_id.generation,
-			            static_cast<unsigned long long>(owner->info.data.address),
-			            static_cast<unsigned long long>(owner->info.data.size),
-			            static_cast<int>(owner->info.pixel_format),
-			            static_cast<uint32_t>(owner->info.guest_format),
-			            static_cast<uint32_t>(owner->info.type), owner->info.extent.width,
-			            owner->info.extent.height, owner->info.extent.depth,
-			            owner->info.resources.levels, owner->info.resources.layers,
-			            owner->info.samples, static_cast<uint32_t>(owner->info.tile_mode),
-			            static_cast<bool>(owner->depth_id), owner->binding.needs_rebind,
-			            owner->IsTracked(), owner->usage.render_target, owner->IsGpuModified(),
-			            static_cast<unsigned long long>(owner->tick_accessed_last));
-		});
-		std::fflush(stdout);
+		m_image_page_table[page].push_back(id);
 	});
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);

@@ -20,35 +20,11 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <span>
 #include <vector>
 
 namespace Libs::Graphics {
-
-static bool TraceStartupPipelineCalls() {
-	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_TRACE_STARTUP");
-		return value != nullptr && std::strcmp(value, "1") == 0;
-	}();
-	return enabled;
-}
-
-static bool DisableComputeOptimizationFor(uint64_t shader_hash) {
-	static const uint64_t target_hash = [] {
-		const char* value = std::getenv("KYTY_DISABLE_CS_OPT_HASH");
-		if (value == nullptr) {
-			return uint64_t {0};
-		}
-		char* end = nullptr;
-		const auto parsed = std::strtoull(value, &end, 0);
-		return end != value && *end == '\0' ? static_cast<uint64_t>(parsed) : uint64_t {0};
-	}();
-	return target_hash != 0 && shader_hash == target_hash;
-}
 
 // IDK: maybe we can remove it?
 constexpr uint8_t kTemporaryVertexAttribFormat113 =
@@ -581,19 +557,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	     dynamic_state.dynamicStateCount,
 	     disable_pipeline_optimization ? "disabled" : "enabled");
 	const auto graphics_pipeline_begin = std::chrono::steady_clock::now();
-	if (TraceStartupPipelineCalls()) {
-		std::printf("PipelineTrace: graphics begin vs=0x%016" PRIx64
-		            " ps=0x%016" PRIx64 "\n",
-		            vs_input_info.stage.program->shader_hash,
-		            ps_active ? ps_input_info->stage.program->shader_hash : 0);
-		std::fflush(stdout);
-	}
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);
-	if (TraceStartupPipelineCalls()) {
-		std::printf("PipelineTrace: graphics done result=%s\n", vk::to_string(result).c_str());
-		std::fflush(stdout);
-	}
 	LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p elapsed_ms=%" PRIu64
 	     "\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline),
@@ -666,8 +631,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	info.layout            = pipeline.pipeline_layout;
 	info.basePipelineIndex = -1;
 	const bool disable_pipeline_optimization =
-	    input_info.stage.program->dispatcher_fallback ||
-	    DisableComputeOptimizationFor(input_info.stage.program->shader_hash);
+	    input_info.stage.program->dispatcher_fallback;
 	info.flags = disable_pipeline_optimization
 	                 ? vk::PipelineCreateFlagBits::eDisableOptimization
 	                 : vk::PipelineCreateFlags {};
@@ -679,21 +643,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	     static_cast<void*>(pipeline.pipeline_layout), input_info.stage.program->shader_hash,
 	     disable_pipeline_optimization ? "disabled" : "enabled");
 	const auto compute_pipeline_begin = std::chrono::steady_clock::now();
-	if (TraceStartupPipelineCalls()) {
-		std::printf("PipelineTrace: compute begin cs=0x%016" PRIx64
-		            " wave=%u subgroup=%s default_subgroup=%u optimization=%s driver_cache=%s\n",
-		            input_info.stage.program->shader_hash, wave_size,
-		            require_subgroup_size ? "required" : "default", graphics.subgroup_size,
-		            disable_pipeline_optimization ? "disabled" : "enabled",
-		            driver_cache == nullptr ? "none" : "present");
-		std::fflush(stdout);
-	}
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
-	if (TraceStartupPipelineCalls()) {
-		std::printf("PipelineTrace: compute done result=%s\n", vk::to_string(result).c_str());
-		std::fflush(stdout);
-	}
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p elapsed_ms=%" PRIu64
 	     "\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline),
